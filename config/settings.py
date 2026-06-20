@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # Vector DB
     VECTOR_DB_TYPE: str = "chromadb"  # or "qdrant"
     VECTOR_DB_PATH: str = "./data/vector_store"
-    CHUNK_SIZE: int = 2000
+    CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
     
     # Retrieval

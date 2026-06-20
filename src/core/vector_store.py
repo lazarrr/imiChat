@@ -1,146 +1,178 @@
-# src/core/vector_store.py
+"""
+vector_store.py
+~~~~~~~~~~~~~~~
+ChromaDB-backed vector store using intfloat/multilingual-e5-large.
+
+Key fixes applied here (see previous review for full context):
+  1. E5 query / passage prefixes applied correctly.
+  2. Duplicate add() block removed.
+  3. Content-hashed IDs + upsert() → idempotent across restarts.
+  4. SIMILARITY_THRESHOLD actually applied to search results.
+  5. DOCX loading replaced: docx2txt → python-docx (strips headers/footers).
+  6. PDF loading added via pdfplumber (strips headers/footers).
+"""
+
 import os
 import hashlib
+
 import chromadb
+import numpy as np
 from chromadb.config import Settings as ChromaSettings
 from sentence_transformers import SentenceTransformer
-import numpy as np
-import docx2txt
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+# Reuse the same header/footer-aware loaders used by DocumentProcessor
+from src.processing.document_loader import DocumentProcessor
 
 
 class VectorStoreManager:
-    # E5 models require these prefixes — without them, similarity search returns garbage
-    QUERY_PREFIX = "query: "
+    # E5 models require explicit prefixes — omitting them degrades retrieval quality
+    QUERY_PREFIX   = "query: "
     PASSAGE_PREFIX = "passage: "
 
     def __init__(self, config):
         self.config = config
         self.embeddings_model = SentenceTransformer(
             config.EMBEDDING_MODEL,
-            device=config.EMBEDDING_DEVICE
+            device=config.EMBEDDING_DEVICE,
         )
         self.client = chromadb.PersistentClient(
             path=config.VECTOR_DB_PATH,
-            settings=ChromaSettings(anonymized_telemetry=False)
+            settings=ChromaSettings(anonymized_telemetry=False),
         )
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
             chunk_overlap=config.CHUNK_OVERLAP,
             length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""]
+            separators=["\n\n", "\n", ". ", " ", ""],
         )
-        # Cosine distance threshold: similarity 0.7 → distance < 0.3
+        # Cosine distance threshold derived from similarity threshold in config.
+        # ChromaDB stores cosine distance (0 = identical, 2 = opposite).
+        # distance < (1 - similarity_threshold) keeps high-quality results.
         self.distance_threshold = 1.0 - config.SIMILARITY_THRESHOLD
 
-    def create_embeddings(self, texts: list, is_query: bool = False) -> np.ndarray:
+        # Internal loader used when add_documents() receives file paths
+        self._loader = DocumentProcessor(
+            chunk_size=config.CHUNK_SIZE,
+            chunk_overlap=config.CHUNK_OVERLAP,
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Embeddings                                                          #
+    # ------------------------------------------------------------------ #
+
+    def create_embeddings(self, texts: list[str], is_query: bool = False) -> np.ndarray:
         """
-        Create embeddings with the correct E5 prefix.
-        - is_query=True  → 'query: ' prefix    (used at search time)
-        - is_query=False → 'passage: ' prefix  (used at index time)
+        Encode texts with the correct E5 prefix.
+          is_query=False  →  'passage: '  (index / add time)
+          is_query=True   →  'query: '    (search time)
         """
         prefix = self.QUERY_PREFIX if is_query else self.PASSAGE_PREFIX
         prefixed = [prefix + t for t in texts]
         return self.embeddings_model.encode(
             prefixed,
             normalize_embeddings=True,
-            show_progress_bar=True
+            show_progress_bar=True,
         )
 
-    def _content_id(self, text: str) -> str:
-        """Stable, content-derived ID — makes add_documents idempotent across restarts."""
+    # ------------------------------------------------------------------ #
+    #  Helpers                                                             #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _content_id(text: str) -> str:
+        """Stable, content-derived document ID — makes upsert idempotent."""
         return hashlib.md5(text.encode("utf-8")).hexdigest()
 
-    def _load_docx(self, file_path: str) -> list:
-        """Extract text from a .docx file and split into chunks."""
-        text = docx2txt.process(file_path)
-        docs = self.text_splitter.create_documents(
-            [text],
-            metadatas=[{"source": file_path, "type": "docx"}]
-        )
-        return docs
-
     def is_populated(self) -> bool:
-        """Check whether the collection already has documents indexed."""
+        """True if the collection already has at least one document."""
         try:
-            collection = self.client.get_collection("university_knowledge")
-            return collection.count() > 0
+            return self.client.get_collection("university_knowledge").count() > 0
         except Exception:
             return False
+
+    # ------------------------------------------------------------------ #
+    #  Indexing                                                            #
+    # ------------------------------------------------------------------ #
 
     def add_documents(self, documents: list, metadata: list = None):
         """
         Add documents to the vector store.
-        Accepts LangChain Document objects or .docx file paths.
-        Safe to call multiple times — uses content-hashed IDs and upsert.
+
+        Accepts:
+          • LangChain Document objects (.page_content / .metadata)
+          • File paths (str) — .docx or .pdf, with headers/footers stripped
         """
         if not documents:
-            print("Warning: No documents to add to vector store")
+            print("Warning: no documents supplied")
             return
 
-        # Resolve file paths to LangChain Document objects
+        # ── Resolve file paths to LangChain Document objects ──────────── #
         if isinstance(documents[0], str):
-            processed_docs = []
+            processed: list = []
             for file_path in documents:
                 if not os.path.isfile(file_path):
-                    print(f"Warning: File not found: {file_path}")
+                    print(f"Warning: file not found — {file_path}")
                     continue
                 ext = os.path.splitext(file_path)[1].lower()
-                if ext == ".docx":
-                    docs = self._load_docx(file_path)
-                    processed_docs.extend(docs)
-                    print(f"Processed DOCX: {os.path.basename(file_path)} — {len(docs)} chunks")
+                if ext in (".docx", ".pdf"):
+                    # DocumentProcessor handles both formats and strips
+                    # headers/footers before returning chunks
+                    chunks = self._loader.process_file(file_path)
+                    processed.extend(chunks)
                 else:
-                    print(f"Warning: Unsupported file type '{ext}' for {file_path}")
+                    print(f"Warning: unsupported file type '{ext}' — {file_path}")
 
-            if not processed_docs:
-                print("Warning: No valid documents were loaded")
+            if not processed:
+                print("Warning: no valid documents were loaded from paths")
                 return
-            documents = processed_docs
+            documents = processed
 
-        # --- Single, non-duplicated add block ---
+        # ── Single, non-duplicated upsert block ───────────────────────── #
         collection = self.client.get_or_create_collection(
             name="university_knowledge",
-            metadata={"hnsw:space": "cosine"}
+            metadata={"hnsw:space": "cosine"},
         )
 
-        texts = [doc.page_content for doc in documents]
-
-        # BUG FIX 1: use passage prefix for indexing
-        embeddings = self.create_embeddings(texts, is_query=False)
+        texts      = [doc.page_content for doc in documents]
+        embeddings = self.create_embeddings(texts, is_query=False)  # passage prefix
 
         if metadata is None:
             metadata = [doc.metadata for doc in documents]
 
-        # BUG FIX 2: content-hashed IDs → idempotent across restarts
         ids = [self._content_id(t) for t in texts]
 
-        # upsert instead of add → safe to call repeatedly
+        # upsert is safe to call repeatedly with the same content
         collection.upsert(
             embeddings=embeddings.tolist(),
             documents=texts,
             metadatas=metadata,
-            ids=ids
+            ids=ids,
         )
         print(f"Upserted {len(texts)} chunks into 'university_knowledge'.")
 
+    # ------------------------------------------------------------------ #
+    #  Retrieval                                                           #
+    # ------------------------------------------------------------------ #
+
     def similarity_search(self, query: str, k: int = 5) -> dict:
         """
-        Search for similar documents.
-        Results are filtered by SIMILARITY_THRESHOLD from config.
+        Search the collection and return results filtered by
+        SIMILARITY_THRESHOLD.  ChromaDB distances are cosine distances,
+        so a similarity of 0.7 maps to a maximum allowed distance of 0.3.
         """
         collection = self.client.get_collection("university_knowledge")
 
-        # BUG FIX 3: use query prefix for search
+        # Use the query prefix — this is critical for E5 retrieval quality
         query_embedding = self.create_embeddings([query], is_query=True)[0]
 
         results = collection.query(
             query_embeddings=[query_embedding.tolist()],
             n_results=k,
-            include=["documents", "metadatas", "distances"]
+            include=["documents", "metadatas", "distances"],
         )
 
-        # BUG FIX 4: apply similarity threshold (cosine distance < 1 - threshold)
+        # Apply threshold filter
         filtered_docs, filtered_meta, filtered_dists = [], [], []
         for doc, meta, dist in zip(
             results["documents"][0],
@@ -152,7 +184,10 @@ class VectorStoreManager:
                 filtered_meta.append(meta)
                 filtered_dists.append(dist)
             else:
-                print(f"Filtered out chunk (distance {dist:.3f} > threshold {self.distance_threshold:.3f})")
+                print(
+                    f"Filtered out chunk (distance {dist:.3f} "
+                    f"> threshold {self.distance_threshold:.3f})"
+                )
 
         return {
             "documents": [filtered_docs],
