@@ -1,0 +1,153 @@
+# ===== Python bytecode & caching =====
+# Compiled Python files — never commit these, they're regenerated on import
+__pycache__/
+*.py[cod]
+*.pyo
+*$py.class
+
+# ===== Python packaging & distribution =====
+# Generated during setup.py install / pip install -e .
+*.egg-info/
+*.egg
+dist/
+build/
+eggs/
+sdist/
+*.whl
+
+# ===== Virtual environments =====
+# Local Python environments — keep dependencies in requirements.txt instead
+venv/
+.venv/
+env/
+.env/
+ENV/
+env.bak/
+venv.bak/
+pip-wheel-metadata/
+
+# ===== Environment & secrets =====
+# API keys, tokens, and sensitive config — never commit!
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+credentials.json
+
+# ===== Vector store & databases =====
+# ChromaDB persistent data — local index, not portable
+*.sqlite3
+*.db
+*.sqlite
+vector_store/
+data/vector_store/
+data/processed/
+
+# ===== LLM model files =====
+# Downloaded models (Ollama, Hugging Face, llama.cpp) — too large for git
+models/
+*.gguf
+*.ggml
+*.bin
+*.safetensors
+ollama_models/
+.cache/
+
+# ===== Jupyter Notebooks =====
+# Notebook checkpoints and outputs
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+.vscode/.ipynb_checkpoints/
+
+# Optional: if notebooks contain large outputs, also ignore the notebooks
+# notebooks/*.ipynb
+
+# ===== IDE & editor files =====
+# VS Code
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/.ropeproject/
+
+# JetBrains / PyCharm
+.idea/
+*.iml
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+
+# ===== OS generated files =====
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+Icon
+.Spotlight-V100
+.Trashes
+
+# Linux
+.directory
+*.desktop
+.Trash-*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ===== Logs & temporary files =====
+*.log
+*.tmp
+*.temp
+logs/
+*.pid
+*.seed
+*.pid.lock
+
+# ===== Testing & coverage =====
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# ===== Docker =====
+# Docker Compose overrides with local settings
+docker-compose.override.yml
+
+# ===== Misc =====
+# mypy type checker cache
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pytype
+.pytype/
+
+# pyright
+.pyright/
+
+# ruff
+.ruff_cache/
+
+# Cython
+*.c
+*.so

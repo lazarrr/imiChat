@@ -1,0 +1,36 @@
+docx2txt>=0.1.0         # DOCX text extraction
+ollama>=0.1.0              # Local LLM management
+llama-cpp-python>=0.2.0    # Alternative for GGUF models
+transformers>=4.36.0       # Hugging Face models
+bitsandbytes>=0.41.0       # Quantization support
+
+# Vector Database
+chromadb>=0.4.0            # Vector storage
+qdrant-client>=1.7.0       # Alternative vector DB
+
+# Text Processing
+langchain>=0.1.0           # Orchestration
+langchain-community>=0.1.0 # Community integrations
+unstructured>=0.11.0       # Document parsing
+
+# Cyrillic-Latinic Conversion
+cyrtranslit>=1.0.0         # Serbian/Macedonian conversion
+transliterate>=1.10.0      # Alternative transliteration
+
+# Web Framework
+fastapi>=0.109.0           # API backend
+uvicorn[standard]>=0.25.0  # ASGI server
+streamlit>=1.29.0          # UI (optional)
+
+# Embeddings
+sentence-transformers>=2.2.0  # Local embeddings
+
+# Data Processing
+pandas>=2.1.0
+numpy>=1.24.0
+pypdf>=4.0.0               # PDF processing
+python-docx>=1.0.0         # Word documents
+
+# Utilities
+pydantic>=2.5.0            # Data validation
+redis>=5.0.0               # Caching (optional)
