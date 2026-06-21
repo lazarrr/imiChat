@@ -35,3 +35,6 @@ pydantic>=2.5.0            # Data validation
 redis>=5.0.0               # Caching (optional)
 pdfplumber>=0.9.0            # PDF text extraction
 python-docx>=1.0.0              # Word document processing
+requests>=2.35.0           # HTTP requests
+beautifulsoup4>=4.13.0      # HTML parsing
+trafilatura>=1.6.0            # Web scraping

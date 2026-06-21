@@ -1,32 +1,48 @@
 """
 document_loader.py
 ~~~~~~~~~~~~~~~~~~
-Loads .docx and .pdf files, strips headers/footers, and returns
-LangChain Document chunks ready for embedding.
-
-Strategy
---------
-DOCX  – python-docx exposes section headers/footers as separate paragraph
-         collections; we collect their text upfront and exclude matching
-         paragraphs when iterating the body stream.
-
-PDF   – pdfplumber allows per-page bounding-box crops.  We:
-          1. Crop away the top 8 % (header zone) and bottom 8 % (footer zone)
-             of every page.
-          2. Run a second pass that collects lines appearing on ≥ 40 % of
-             pages (page numbers, running titles) and drops them even if they
-             leaked into the body crop area.
+Loads .docx files, .pdf files, and web pages — strips headers/footers —
+and returns LangChain Document chunks with a unified metadata schema:
+ 
+    {
+        "source":   str   # full file path or URL
+        "filename": str   # display name (basename or page title)
+        "type":     str   # "pdf" | "docx" | "web"
+        "page":     int   # 1-based page number for PDFs, 0 otherwise
+        "url":      str   # populated for web sources, empty string for files
+    }
+ 
+This makes it trivial to render consistent citations in the QA layer
+regardless of where the content came from.
 """
 
 import os
 import re
+import time
 from collections import Counter
 
 import pdfplumber
+import requests
+from bs4 import BeautifulSoup
 from docx import Document
 from langchain_core.documents import Document as LCDocument
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+
+
+# --------------------------------------------------------------------------- #
+#  Shared text splitter factory                                                #
+# --------------------------------------------------------------------------- #
+ 
+def _make_splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+    return RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        length_function=len,
+        separators=["\n\n", "\n", ". ", " ", ""],
+    )
+ 
+ 
 
 class DocumentProcessor:
     # ------------------------------------------------------------------ #
@@ -57,12 +73,7 @@ class DocumentProcessor:
         self.footer_fraction = footer_fraction
         self.repetition_threshold = repetition_threshold
 
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""],
-        )
+        self.text_splitter = _make_splitter(chunk_size, chunk_overlap)
 
     # ================================================================== #
     #  DOCX                                                               #
@@ -247,3 +258,133 @@ class DocumentProcessor:
                     full_path = os.path.join(root, fname)
                     all_docs.extend(self.process_file(full_path))
         return all_docs
+    
+# --------------------------------------------------------------------------- #
+#  WebLoader                                                                   #
+# --------------------------------------------------------------------------- #
+ 
+class WebLoader:
+    """
+    Fetch one or more web pages and turn them into clean, chunked
+    LangChain Documents with the page URL stored in metadata.
+ 
+    Content extraction strategy
+    ---------------------------
+    1. Try trafilatura (best-in-class article extractor -- strips nav,
+       ads, sidebars).  Install with:  pip install trafilatura
+    2. Fall back to BeautifulSoup if trafilatura is not installed or
+       fails to extract any content.
+    """
+ 
+    DEFAULT_TIMEOUT:    int   = 15
+    DEFAULT_RATE_LIMIT: float = 1.0   # seconds between consecutive fetches
+ 
+    def __init__(
+        self,
+        chunk_size:    int   = 1000,
+        chunk_overlap: int   = 200,
+        timeout:       int   = DEFAULT_TIMEOUT,
+        rate_limit:    float = DEFAULT_RATE_LIMIT,
+    ):
+        self.timeout       = timeout
+        self.rate_limit    = rate_limit
+        self.text_splitter = _make_splitter(chunk_size, chunk_overlap)
+        self._session      = requests.Session()
+        self._session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (compatible; UniversityRAGBot/1.0)"
+            )
+        })
+ 
+    # ------------------------------------------------------------------ #
+    #  Extraction helpers                                                  #
+    # ------------------------------------------------------------------ #
+ 
+    @staticmethod
+    def _extract_with_trafilatura(html: str, url: str) -> tuple[str, str]:
+        """Returns (title, body_text). Raises ImportError if not installed."""
+        import trafilatura
+ 
+        content = trafilatura.extract(
+            html,
+            url=url,
+            include_comments=False,
+            include_tables=True,
+            no_fallback=False,
+        )
+        meta  = trafilatura.extract_metadata(html)
+        title = (meta.title if meta and meta.title else "") or url
+        return title, content or ""
+ 
+    @staticmethod
+    def _extract_with_bs4(html: str, url: str) -> tuple[str, str]:
+        """BeautifulSoup fallback extractor."""
+        soup = BeautifulSoup(html, "html.parser")
+        for tag in soup(["script", "style", "nav", "header", "footer",
+                         "aside", "form", "noscript", "iframe"]):
+            tag.decompose()
+ 
+        title    = soup.title.string.strip() if soup.title and soup.title.string else url
+        body_tag = soup.find("main") or soup.find("article") or soup.body
+        if body_tag is None:
+            return title, ""
+ 
+        lines = [
+            line.strip()
+            for line in body_tag.get_text(separator="\n").splitlines()
+            if line.strip()
+        ]
+        return title, "\n".join(lines)
+ 
+    def _fetch_and_extract(self, url: str) -> tuple[str, str]:
+        """Fetch a URL and return (title, clean_text)."""
+        response = self._session.get(url, timeout=self.timeout)
+        response.raise_for_status()
+        html = response.text
+ 
+        try:
+            title, text = self._extract_with_trafilatura(html, url)
+            if text.strip():
+                return title, text
+        except ImportError:
+            pass
+ 
+        return self._extract_with_bs4(html, url)
+ 
+    # ------------------------------------------------------------------ #
+    #  Public API                                                          #
+    # ------------------------------------------------------------------ #
+ 
+    def load_url(self, url: str) -> list[LCDocument]:
+        """Fetch a single URL, clean the content, and return chunks."""
+        try:
+            title, text = self._fetch_and_extract(url)
+        except Exception as exc:
+            print(f"  Failed to fetch {url}: {exc}")
+            return []
+ 
+        if not text.strip():
+            print(f"  No content extracted from {url}")
+            return []
+ 
+        meta = {
+            "source":   url,
+            "filename": title,   # page <title> or the URL itself
+            "type":     "web",
+            "page":     0,
+            "url":      url,
+        }
+        chunks = self.text_splitter.create_documents([text], metadatas=[meta])
+        print(f"  {url} -> {len(chunks)} chunks  (title: {title!r})")
+        return chunks
+ 
+    def load_urls(self, urls: list[str]) -> list[LCDocument]:
+        """Fetch multiple URLs with a polite delay between requests."""
+        all_docs: list[LCDocument] = []
+        for i, url in enumerate(urls):
+            docs = self.load_url(url)
+            all_docs.extend(docs)
+            if i < len(urls) - 1:
+                time.sleep(self.rate_limit)
+        return all_docs
+ 
