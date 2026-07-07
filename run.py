@@ -14,6 +14,7 @@ from src.chains.qa_chain import UniversityQASystem
 from src.processing.translator import ScriptTranslator
 from src.processing.document_loader import DocumentProcessor, WebLoader
 from src.processing.ingest import IngestionPipeline
+from src.processing.crawl_history import CrawlHistoryManager
 from config.settings import settings
 
 logging.basicConfig(level=logging.INFO)
@@ -27,6 +28,16 @@ def initialize_system():
     llm_manager  = LLMManager(settings)
     vector_store = VectorStoreManager(settings)
 
+    # ── Crawl history (skip already-ingested URLs on subsequent runs) ─ #
+    crawl_history: CrawlHistoryManager | None = None
+    if settings.CRAWL_HISTORY_ENABLED:
+        crawl_history = CrawlHistoryManager(
+            file_path=settings.CRAWL_HISTORY_PATH,
+            base_url="https://imi.pmf.kg.ac.rs/",
+        )
+        crawl_history.load()
+        logger.info(f"Crawl history loaded: {crawl_history.ingested_count()} URLs already ingested")
+
     pipeline = IngestionPipeline(
         vector_store=vector_store,
         chunk_size=settings.CHUNK_SIZE,
@@ -34,6 +45,17 @@ def initialize_system():
         max_depth=settings.CRAWLER_MAX_DEPTH,
         delay=settings.CRAWLER_DELAY,
         timeout=settings.CRAWLER_TIMEOUT,
+        crawler_include_patterns=(
+            settings.CRAWLER_INCLUDE_PATTERNS
+            if settings.CRAWLER_FILTER_MODE == "include"
+            else None
+        ),
+        crawler_exclude_patterns=(
+            settings.CRAWLER_EXCLUDE_PATTERNS
+            if settings.CRAWLER_FILTER_MODE == "exclude"
+            else None
+        ),
+        crawl_history=crawl_history,
     )
 
     # Crawl the university domain and ingest everything automatically

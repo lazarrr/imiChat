@@ -22,6 +22,7 @@ from langchain_core.documents import Document as LCDocument
 from src.core.vector_store import VectorStoreManager
 from src.processing.crawler import DomainCrawler, CrawledURL
 from src.processing.extractor import ResourceExtractor
+from src.processing.crawl_history import CrawlHistoryManager
 
 
 class IngestionPipeline:
@@ -37,6 +38,9 @@ class IngestionPipeline:
         max_depth: int = 3,
         delay: float = 1.0,
         timeout: int = 15,
+        crawler_include_patterns: list[str] | None = None,
+        crawler_exclude_patterns: list[str] | None = None,
+        crawl_history: CrawlHistoryManager | None = None,
     ):
         self.vector_store = vector_store
         self.chunk_size = chunk_size
@@ -44,6 +48,9 @@ class IngestionPipeline:
         self.max_depth = max_depth
         self.delay = delay
         self.timeout = timeout
+        self.crawler_include_patterns = crawler_include_patterns
+        self.crawler_exclude_patterns = crawler_exclude_patterns
+        self.crawl_history = crawl_history
 
         self._splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
@@ -72,6 +79,8 @@ class IngestionPipeline:
             max_depth=self.max_depth,
             delay=self.delay,
             timeout=self.timeout,
+            include_patterns=self.crawler_include_patterns,
+            exclude_patterns=self.crawler_exclude_patterns,
         )
         results = crawler.crawl()
 
@@ -80,12 +89,32 @@ class IngestionPipeline:
             print("No extractable URLs found.")
             return 0
 
+        # ── Filter out already-ingested URLs ───────────────────────── #
+        skipped_already: list[CrawledURL] = []
+        new_urls: list[CrawledURL] = []
+        if self.crawl_history:
+            self.crawl_history.load()
+            for r in extractable:
+                if self.crawl_history.is_ingested(r.url):
+                    skipped_already.append(r)
+                else:
+                    new_urls.append(r)
+            if skipped_already:
+                print(f"Skipping {len(skipped_already)} already-ingested URLs "
+                      f"(use CRAWL_HISTORY_ENABLED=False to force re-crawl)")
+        else:
+            new_urls = extractable
+
+        if not new_urls:
+            print("All URLs already ingested — nothing to do.")
+            return 0
+
         # ── Step 2: Extract + Chunk + Upsert ───────────────────────── #
-        print(f"\n=== Extracting {len(extractable)} resources ===")
+        print(f"\n=== Extracting {len(new_urls)} resources ===")
         extractor = ResourceExtractor(timeout=self.timeout)
 
-        for i, crawled in enumerate(extractable, start=1):
-            print(f"\n[{i}/{len(extractable)}] {crawled.type.upper()} {crawled.url}")
+        for i, crawled in enumerate(new_urls, start=1):
+            print(f"\n[{i}/{len(new_urls)}] {crawled.type.upper()} {crawled.url}")
 
             extracted = extractor.extract(crawled.url, crawled.type)
             if extracted is None:
@@ -107,9 +136,19 @@ class IngestionPipeline:
                 self._upsert_chunks(chunks)
                 total_chunks += len(chunks)
 
+            # Mark as ingested so we skip it next run
+            if self.crawl_history:
+                self.crawl_history.mark_ingested(
+                    crawled.url, crawled.type, num_chunks=len(chunks) if chunks else 0
+                )
+
             # Politeness between extraction requests too
-            if self.delay > 0 and i < len(extractable):
+            if self.delay > 0 and i < len(new_urls):
                 time.sleep(self.delay)
+
+        # ── Save crawl history ──────────────────────────────────────── #
+        if self.crawl_history:
+            self.crawl_history.save()
 
         print(f"\n=== Done: {total_chunks} total chunks upserted ===")
         return total_chunks

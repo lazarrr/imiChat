@@ -44,6 +44,7 @@ credentials.json
 vector_store/
 data/vector_store/
 data/processed/
+data/*.json
 
 # ===== LLM model files =====
 # Downloaded models (Ollama, Hugging Face, llama.cpp) — too large for git

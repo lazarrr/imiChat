@@ -10,6 +10,7 @@ Features
 • Classifies each discovered URL: html, pdf, docx, or skip
 • Maintains a visited set to avoid cycles
 • Configurable depth limit and politeness delay between requests
+• URL path filtering via include/exclude regex patterns
 
 Output: list[CrawledURL] — each with .url, .type, .depth
 """
@@ -54,6 +55,8 @@ class DomainCrawler:
         delay: float = 1.0,
         timeout: int = 15,
         user_agent: str = "Mozilla/5.0 (compatible; UniversityRAGBot/1.0)",
+        include_patterns: list[str] | None = None,
+        exclude_patterns: list[str] | None = None,
     ):
         self.base_url  = base_url.rstrip("/")
         self.max_depth = max_depth
@@ -69,6 +72,15 @@ class DomainCrawler:
 
         self._visited: set[str] = set()
         self._robots: RobotFileParser | None = None
+
+        # ── URL path filtering ─────────────────────────────────────── #
+        self._include_patterns = [
+            re.compile(p, re.I) for p in (include_patterns or [])
+        ]
+        self._exclude_patterns = [
+            re.compile(p, re.I) for p in (exclude_patterns or [])
+        ]
+        self._has_filters = bool(self._include_patterns or self._exclude_patterns)
 
     # ------------------------------------------------------------------ #
     #  Robots.txt                                                          #
@@ -92,6 +104,34 @@ class DomainCrawler:
         return self._robots.can_fetch(
             self._session.headers.get("User-Agent", "*"), url
         )
+
+    # ------------------------------------------------------------------ #
+    #  URL path filtering                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _is_relevant_path(self, url: str) -> bool:
+        """
+        Returns True if the URL path matches the configured include/exclude
+        patterns.  When no filters are configured, all paths pass.
+        """
+        if not self._has_filters:
+            return True
+
+        path = urlparse(url).path
+
+        # Exclude patterns always take priority
+        for pat in self._exclude_patterns:
+            if pat.search(path):
+                return False
+
+        # If include patterns are defined, at least one must match
+        if self._include_patterns:
+            for pat in self._include_patterns:
+                if pat.search(path):
+                    return True
+            return False
+
+        return True
 
     # ------------------------------------------------------------------ #
     #  URL classification                                                   #
@@ -144,6 +184,7 @@ class DomainCrawler:
         results: list[CrawledURL] = []
         queue: deque[tuple[str, int]] = deque()
         queue.append((self.base_url, 0))
+        filtered_count: int = 0
 
         while queue:
             current_url, depth = queue.popleft()
@@ -154,6 +195,11 @@ class DomainCrawler:
                 continue
             if not self._is_allowed(current_url):
                 print(f"  [robots.txt] Skipping: {current_url}")
+                continue
+            if not self._is_relevant_path(current_url):
+                filtered_count += 1
+                # Mark as visited so we don't re-queue it later
+                self._visited.add(current_url)
                 continue
 
             self._visited.add(current_url)
@@ -188,7 +234,8 @@ class DomainCrawler:
                 time.sleep(self.delay)
 
         print(f"\nCrawl complete: {len(results)} URLs "
-              f"({len([r for r in results if r.type != 'skip'])} extractable)")
+              f"({len([r for r in results if r.type != 'skip'])} extractable) "
+              f"[{filtered_count} filtered by path patterns]")
         return results
 
     @staticmethod
