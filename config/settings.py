@@ -32,6 +32,12 @@ class Settings(BaseSettings):
     
     # Redis (optional)
     REDIS_URL: Optional[str] = "redis://localhost:6379"
+
+    # Crawler
+    CRAWLER_MAX_DEPTH: int = 3
+    CRAWLER_DELAY: float = 1.0
+    CRAWLER_TIMEOUT: int = 15
+    CRAWLER_USER_AGENT: str = "Mozilla/5.0 (compatible; UniversityRAGBot/1.0)"
     
     class Config:
         env_file = ".env"

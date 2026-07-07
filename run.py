@@ -6,11 +6,14 @@ then run the QA loop with formatted source citations.
 """
 
 import logging
+
+from transformers import pipeline
 from src.core.vector_store import VectorStoreManager
 from src.core.llm_manager import LLMManager
 from src.chains.qa_chain import UniversityQASystem
 from src.processing.translator import ScriptTranslator
 from src.processing.document_loader import DocumentProcessor, WebLoader
+from src.processing.ingest import IngestionPipeline
 from config.settings import settings
 
 logging.basicConfig(level=logging.INFO)
@@ -24,34 +27,46 @@ def initialize_system():
     llm_manager  = LLMManager(settings)
     vector_store = VectorStoreManager(settings)
 
-    if not vector_store.is_populated():
-        logger.info("Collection is empty — indexing documents...")
+    pipeline = IngestionPipeline(
+        vector_store=vector_store,
+        chunk_size=settings.CHUNK_SIZE,
+        chunk_overlap=settings.CHUNK_OVERLAP,
+        max_depth=settings.CRAWLER_MAX_DEPTH,
+        delay=settings.CRAWLER_DELAY,
+        timeout=settings.CRAWLER_TIMEOUT,
+    )
 
-        # ── Local files (PDF + DOCX, headers/footers stripped) ───────── #
-        doc_processor = DocumentProcessor(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
-        )
-        file_docs = doc_processor.process_directory("./data/raw")
-        logger.info(f"Local files: {len(file_docs)} chunks")
+    # Crawl the university domain and ingest everything automatically
+    pipeline.ingest_from_url("https://imi.pmf.kg.ac.rs/")
 
-        # ── Web pages ─────────────────────────────────────────────────── #
-        web_loader = WebLoader(
-            chunk_size=settings.CHUNK_SIZE,
-            chunk_overlap=settings.CHUNK_OVERLAP,
-        )
-        web_urls = [
-            # Add your university web page URLs here
-            "https://imi.pmf.kg.ac.rs/vesti/11836-novi-smerovi-na-oas-matematike-i-oas-informatike",
-        ]
-        web_docs = web_loader.load_urls(web_urls) if web_urls else []
-        logger.info(f"Web pages: {len(web_docs)} chunks")
+    # if not vector_store.is_populated():
+    #     logger.info("Collection is empty — indexing documents...")
 
-        all_docs = file_docs + web_docs
-        if all_docs:
-            vector_store.add_documents(all_docs)
-    else:
-        logger.info("Collection already populated — skipping indexing.")
+    #     # ── Local files (PDF + DOCX, headers/footers stripped) ───────── #
+    #     doc_processor = DocumentProcessor(
+    #         chunk_size=settings.CHUNK_SIZE,
+    #         chunk_overlap=settings.CHUNK_OVERLAP,
+    #     )
+    #     file_docs = doc_processor.process_directory("./data/raw")
+    #     logger.info(f"Local files: {len(file_docs)} chunks")
+
+    #     # ── Web pages ─────────────────────────────────────────────────── #
+    #     web_loader = WebLoader(
+    #         chunk_size=settings.CHUNK_SIZE,
+    #         chunk_overlap=settings.CHUNK_OVERLAP,
+    #     )
+    #     web_urls = [
+    #         # Add your university web page URLs here
+    #         "https://imi.pmf.kg.ac.rs/vesti/11836-novi-smerovi-na-oas-matematike-i-oas-informatike",
+    #     ]
+    #     web_docs = web_loader.load_urls(web_urls) if web_urls else []
+    #     logger.info(f"Web pages: {len(web_docs)} chunks")
+
+    #     all_docs = file_docs + web_docs
+    #     if all_docs:
+    #         vector_store.add_documents(all_docs)
+    # else:
+    #     logger.info("Collection already populated — skipping indexing.")
 
     qa_system = UniversityQASystem(llm_manager, vector_store, translator)
     logger.info("System ready.")
