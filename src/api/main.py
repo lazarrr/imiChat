@@ -9,7 +9,6 @@ from src.core.vector_store import VectorStoreManager
 from src.core.llm_manager import LLMManager
 from src.chains.qa_chain import UniversityQASystem
 from src.processing.translator import ScriptTranslator
-from src.processing.document_loader import DocumentProcessor
 from fastapi.responses import StreamingResponse
 from typing import AsyncGenerator
 import json
@@ -47,17 +46,7 @@ def initialize_system():
     llm_manager = LLMManager(settings)
     vector_store = VectorStoreManager(settings)
     
-    # Process documents if needed
-    doc_processor = DocumentProcessor(
-        chunk_size=settings.CHUNK_SIZE,
-        chunk_overlap=settings.CHUNK_OVERLAP
-    )
-    
-    # Load and index documents
-    #documents = doc_processor.process_directory("./data/raw")
-    #vector_store.add_documents(documents)
-    
-    # Create QA system
+    # Create QA system (reads from existing ChromaDB — scraper populates it)
     qa_system = UniversityQASystem(llm_manager, vector_store, translator)
     
     logger.info("System initialized successfully!")

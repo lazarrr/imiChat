@@ -1,158 +1,126 @@
 """
 vector_store.py
 ~~~~~~~~~~~~~~~
-ChromaDB-backed vector store using intfloat/multilingual-e5-large.
+Read-only ChromaDB vector store for university-chatbot.
 
-Key fixes applied here (see previous review for full context):
-  1. E5 query / passage prefixes applied correctly.
-  2. Duplicate add() block removed.
-  3. Content-hashed IDs + upsert() → idempotent across restarts.
-  4. SIMILARITY_THRESHOLD actually applied to search results.
-  5. DOCX loading replaced: docx2txt → python-docx (strips headers/footers).
-  6. PDF loading added via pdfplumber (strips headers/footers).
+Reads shared_config.json from the persist directory to discover the
+embedding model, collection name, E5 prefixes, and HNSW space that the
+university-scraper used when populating the store.  This guarantees
+query-time embedding parameters match write-time exactly.
+
+Capabilities (READ side only):
+  • Load SentenceTransformer with the configured embedding model
+  • Create query embeddings with the E5 "query: " prefix
+  • Similarity search with threshold filtering
 """
 
+from __future__ import annotations
+
+import json
 import os
-import hashlib
 
 import chromadb
 import numpy as np
 from chromadb.config import Settings as ChromaSettings
 from sentence_transformers import SentenceTransformer
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-
-# Reuse the same header/footer-aware loaders used by DocumentProcessor
-from src.processing.document_loader import DocumentProcessor
 
 
 class VectorStoreManager:
-    # E5 models require explicit prefixes — omitting them degrades retrieval quality
-    QUERY_PREFIX   = "query: "
-    PASSAGE_PREFIX = "passage: "
+    """
+    Read-only vector store for the chatbot.
+
+    All shared constants (model name, collection name, prefixes,
+    HNSW space, normalisation) are read from shared_config.json
+    in the persist directory.  If the file is missing the manager
+    falls back to hard-coded defaults and logs a warning.
+    """
+
+    # ------------------------------------------------------------------ #
+    #  Hard-coded fallback defaults                                        #
+    #  (must match shared_config.json + university-scraper exactly)        #
+    # ------------------------------------------------------------------ #
+    _DEFAULTS: dict = {
+        "collection_name": "university_knowledge",
+        "embedding_model": "intfloat/multilingual-e5-large",
+        "embedding_device": "cpu",
+        "normalize_embeddings": True,
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+        "hnsw_space": "cosine",
+    }
 
     def __init__(self, config):
         self.config = config
+
+        # ── Load shared config from the persist directory ─────────── #
+        self._shared = self._load_shared_config(config.VECTOR_DB_PATH)
+
+        # ── SentenceTransformer ───────────────────────────────────── #
         self.embeddings_model = SentenceTransformer(
-            config.EMBEDDING_MODEL,
-            device=config.EMBEDDING_DEVICE,
+            self._shared["embedding_model"],
+            device=self._shared["embedding_device"],
         )
+        self._normalize = self._shared["normalize_embeddings"]
+
+        # ── ChromaDB client (read-only intent) ────────────────────── #
         self.client = chromadb.PersistentClient(
             path=config.VECTOR_DB_PATH,
             settings=ChromaSettings(anonymized_telemetry=False),
         )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=config.CHUNK_SIZE,
-            chunk_overlap=config.CHUNK_OVERLAP,
-            length_function=len,
-            separators=["\n\n", "\n", ". ", " ", ""],
-        )
-        # Cosine distance threshold derived from similarity threshold in config.
-        # ChromaDB stores cosine distance (0 = identical, 2 = opposite).
-        # distance < (1 - similarity_threshold) keeps high-quality results.
-        self.distance_threshold = 1.0 - config.SIMILARITY_THRESHOLD
 
-        # Internal loader used when add_documents() receives file paths
-        self._loader = DocumentProcessor(
-            chunk_size=config.CHUNK_SIZE,
-            chunk_overlap=config.CHUNK_OVERLAP,
-        )
+        self._collection_name = self._shared["collection_name"]
+
+        # Derived threshold: ChromaDB uses cosine distance (0=identical, 2=opposite)
+        self._distance_threshold = 1.0 - config.SIMILARITY_THRESHOLD
+
+    # ------------------------------------------------------------------ #
+    #  Shared config                                                        #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _load_shared_config(cls, persist_dir: str) -> dict:
+        """Load shared_config.json, falling back to hard-coded defaults."""
+        path = os.path.join(persist_dir, "shared_config.json")
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    loaded = json.load(fh)
+                merged = {**cls._DEFAULTS, **loaded}
+                print(f"Loaded shared config from {path}")
+                return merged
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"Warning: could not parse {path}: {exc}.  Using defaults.")
+        else:
+            print(
+                f"Warning: {path} not found.  "
+                f"Make sure the university-scraper has been run at least once "
+                f"to populate this directory and generate shared_config.json.  "
+                f"Using hard-coded defaults for now."
+            )
+        return dict(cls._DEFAULTS)
 
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def create_embeddings(self, texts: list[str], is_query: bool = False) -> np.ndarray:
+    def create_embeddings(self, texts: list[str], is_query: bool = True) -> np.ndarray:
         """
         Encode texts with the correct E5 prefix.
-          is_query=False  →  'passage: '  (index / add time)
-          is_query=True   →  'query: '    (search time)
+
+        The scraper uses ``passage: `` when writing; the chatbot MUST
+        use ``query: `` when searching.  This asymmetry is what makes
+        E5-family models work correctly for retrieval.
         """
-        prefix = self.QUERY_PREFIX if is_query else self.PASSAGE_PREFIX
+        prefix = self._shared["query_prefix"] if is_query else self._shared["passage_prefix"]
         prefixed = [prefix + t for t in texts]
         return self.embeddings_model.encode(
             prefixed,
-            normalize_embeddings=True,
+            normalize_embeddings=self._normalize,
             show_progress_bar=True,
         )
 
     # ------------------------------------------------------------------ #
-    #  Helpers                                                             #
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _content_id(text: str) -> str:
-        """Stable, content-derived document ID — makes upsert idempotent."""
-        return hashlib.md5(text.encode("utf-8")).hexdigest()
-
-    def is_populated(self) -> bool:
-        """True if the collection already has at least one document."""
-        try:
-            return self.client.get_collection("university_knowledge").count() > 0
-        except Exception:
-            return False
-
-    # ------------------------------------------------------------------ #
-    #  Indexing                                                            #
-    # ------------------------------------------------------------------ #
-
-    def add_documents(self, documents: list, metadata: list = None):
-        """
-        Add documents to the vector store.
-
-        Accepts:
-          • LangChain Document objects (.page_content / .metadata)
-          • File paths (str) — .docx or .pdf, with headers/footers stripped
-        """
-        if not documents:
-            print("Warning: no documents supplied")
-            return
-
-        # ── Resolve file paths to LangChain Document objects ──────────── #
-        if isinstance(documents[0], str):
-            processed: list = []
-            for file_path in documents:
-                if not os.path.isfile(file_path):
-                    print(f"Warning: file not found — {file_path}")
-                    continue
-                ext = os.path.splitext(file_path)[1].lower()
-                if ext in (".docx", ".pdf"):
-                    # DocumentProcessor handles both formats and strips
-                    # headers/footers before returning chunks
-                    chunks = self._loader.process_file(file_path)
-                    processed.extend(chunks)
-                else:
-                    print(f"Warning: unsupported file type '{ext}' — {file_path}")
-
-            if not processed:
-                print("Warning: no valid documents were loaded from paths")
-                return
-            documents = processed
-
-        # ── Single, non-duplicated upsert block ───────────────────────── #
-        collection = self.client.get_or_create_collection(
-            name="university_knowledge",
-            metadata={"hnsw:space": "cosine"},
-        )
-
-        texts      = [doc.page_content for doc in documents]
-        embeddings = self.create_embeddings(texts, is_query=False)  # passage prefix
-
-        if metadata is None:
-            metadata = [doc.metadata for doc in documents]
-
-        ids = [self._content_id(t) for t in texts]
-
-        # upsert is safe to call repeatedly with the same content
-        collection.upsert(
-            embeddings=embeddings.tolist(),
-            documents=texts,
-            metadatas=metadata,
-            ids=ids,
-        )
-        print(f"Upserted {len(texts)} chunks into 'university_knowledge'.")
-
-    # ------------------------------------------------------------------ #
-    #  Retrieval                                                           #
+    #  Retrieval (READ ONLY — no indexing methods)                         #
     # ------------------------------------------------------------------ #
 
     def similarity_search(self, query: str, k: int = 5) -> dict:
@@ -161,9 +129,9 @@ class VectorStoreManager:
         SIMILARITY_THRESHOLD.  ChromaDB distances are cosine distances,
         so a similarity of 0.7 maps to a maximum allowed distance of 0.3.
         """
-        collection = self.client.get_collection("university_knowledge")
+        collection = self.client.get_collection(self._collection_name)
 
-        # Use the query prefix — this is critical for E5 retrieval quality
+        # Query prefix — critical for E5 retrieval quality
         query_embedding = self.create_embeddings([query], is_query=True)[0]
 
         results = collection.query(
@@ -179,14 +147,14 @@ class VectorStoreManager:
             results["metadatas"][0],
             results["distances"][0],
         ):
-            if dist <= self.distance_threshold:
+            if dist <= self._distance_threshold:
                 filtered_docs.append(doc)
                 filtered_meta.append(meta)
                 filtered_dists.append(dist)
             else:
                 print(
                     f"Filtered out chunk (distance {dist:.3f} "
-                    f"> threshold {self.distance_threshold:.3f})"
+                    f"> threshold {self._distance_threshold:.3f})"
                 )
 
         return {
