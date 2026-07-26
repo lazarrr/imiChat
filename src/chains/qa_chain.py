@@ -4,6 +4,15 @@ qa_chain.py
 University QA system — retrieves relevant chunks, formats citations,
 and generates a grounded answer via the local LLM.
 
+Multi-turn conversation support (v2)
+------------------------------------
+- Maintains per-session conversation history.
+- Rewrites follow-up questions into standalone queries before embedding.
+- Sends full message history to Ollama /api/chat with explicit num_ctx.
+- Trims oldest turns when the token budget would be exceeded.
+- Falls back to alternative retrieval strategies if the rewritten query
+  returns no results.
+
 Source references
 -----------------
 Every chunk in ChromaDB now carries a unified metadata schema:
@@ -21,32 +30,37 @@ _format_sources() turns that into human-readable citation lines:
     [3] Osnovi programiranja — https://example.com/article
 """
 
+from __future__ import annotations
+
+import logging
 from collections.abc import AsyncGenerator
-from langchain_core.prompts import PromptTemplate
+
+logger = logging.getLogger(__name__)
+
+# ── rough token estimator (char-based, ~4 chars / token) ────────────── #
+def _estimate_tokens(text: str) -> int:
+    """Fast, zero-dependency token count approximation."""
+    return max(1, len(text) // 4)
 
 
 class UniversityQASystem:
+    # System prompt sent as the first message in every /api/chat call
+    SYSTEM_PROMPT = (
+        "Vi ste korisni univerzitetski asistent. Odgovarajte na pitanja "
+        "na osnovu prilozenog konteksta iskljucivo na srpskom latinskom pismu. "
+        "Ako informacija nije u kontekstu, jasno to navedite. "
+        "Kada koristite informacije iz konteksta, referencite izvore u obliku "
+        "[Izvor N] unutar odgovora."
+    )
+
     def __init__(self, llm_manager, vector_store, translator):
         self.llm_manager  = llm_manager
         self.vector_store = vector_store
         self.translator   = translator
 
-        self.prompt_template = PromptTemplate(
-            template="""Vi ste korisni univerzitetski asistent. Odgovarajte na pitanja na osnovu priloženog konteksta.
-
-Kontekst:
-{context}
-
-Pitanje: {question}
-
-Uputstva:
-1. Odgovarajte iskljucivo na srpskom latinskom pismu
-2. Pruzite tacne informacije iz konteksta
-3. Ako informacija nije u kontekstu, jasno to navedite
-4. Na kraju odgovora navedite izvore u obliku [1], [2] itd.
-
-Odgovor:""",
-            input_variables=["context", "question"],
+        # Context-window ceiling (tokens) — derived from LLM config
+        self.num_ctx = getattr(
+            llm_manager, "num_ctx", getattr(llm_manager.config, "LLM_NUM_CTX", 8192)
         )
 
     # ------------------------------------------------------------------ #
@@ -129,13 +143,197 @@ Odgovor:""",
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ #
-    #  Query                                                               #
+    #  Conversation history helpers                                        #
     # ------------------------------------------------------------------ #
 
-    def query(self, question: str, k: int = 5) -> dict:
+    @staticmethod
+    def _format_history_for_rewrite(history: list[dict[str, str]]) -> str:
+        """
+        Convert the last 1–2 turns into a compact text block for the
+        query-rewrite prompt.
+
+        Assistant messages are truncated to 300 chars to keep the prompt
+        focused on the topic rather than the full answer text.
+
+        Example output:
+            User: Koliko ESPB ima predmet Uvod u programiranje?
+            Assistant: Predmet Uvod u programiranje nosi 6 ESPB bodova...
+        """
+        if not history:
+            return ""
+        # Use at most the last 4 messages (2 full turns)
+        recent = history[-4:]
+        lines: list[str] = []
+        for msg in recent:
+            role = msg.get("role", "user")
+            label = "Korisnik" if role == "user" else "Asistent"
+            content = msg.get("content", "")
+            if role == "assistant" and len(content) > 300:
+                content = content[:300] + "..."
+            lines.append(f"{label}: {content}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------ #
+    #  Query contextualization  (Fix #2)                                   #
+    # ------------------------------------------------------------------ #
+
+    def _standalone_question(
+        self, question: str, history: list[dict[str, str]] | None = None
+    ) -> str:
+        """
+        Rewrite the latest user question into a standalone, self-contained
+        question using conversation history, so that embedding-based
+        retrieval works correctly for follow-up questions.
+
+        If there is no history or the rewrite fails, the original question
+        is returned unchanged.
+        """
+        if not history:
+            return question
+
+        history_text = self._format_history_for_rewrite(history)
+        if not history_text.strip():
+            return question
+
+        rewritten = self.llm_manager.rewrite_query(history_text, question)
+        logger.info("Query rewrite: %r → %r", question, rewritten)
+
+        rewritten_stripped = rewritten.strip()
+
+        if not rewritten_stripped:
+            logger.warning("Rewrite empty, falling back to original question")
+            return question
+
+        if len(rewritten_stripped) < len(question) * 0.3:
+            logger.warning("Rewrite too short, falling back to original question")
+            return question
+
+        if rewritten_stripped == question.strip():
+            logger.warning("Rewrite unchanged, falling back to original question")
+            return question
+
+        if len(rewritten_stripped) > len(question) * 5:
+            logger.warning("Rewrite suspiciously long (%d → %d chars), using original",
+                           len(question), len(rewritten_stripped))
+            return question
+
+        return rewritten_stripped
+
+    # ------------------------------------------------------------------ #
+    #  Token-budget guard  (Fix #3)                                        #
+    # ------------------------------------------------------------------ #
+
+    def _trim_history(
+        self,
+        history: list[dict[str, str]],
+        context: str,
+        question: str,
+    ) -> list[dict[str, str]]:
+        """
+        Ensure system_prompt + history + context + question fits inside
+        the configured num_ctx by keeping the newest turns that fit.
+
+        Messages that individually exceed the remaining budget are skipped
+        rather than causing all older messages to be dropped.
+        """
+        system_tokens = _estimate_tokens(self.SYSTEM_PROMPT)
+        # Account for the wrapping text added by _build_user_content
+        user_wrapper = f"Kontekst:\n{context}\n\nPitanje: {question}"
+        user_tokens = _estimate_tokens(user_wrapper)
+        budget = int(self.num_ctx * 0.8) - system_tokens - user_tokens
+
+        trimmed: list[dict[str, str]] = []
+        for msg in reversed(history):
+            msg_tokens = _estimate_tokens(msg.get("content", ""))
+            if msg_tokens <= budget:
+                trimmed.insert(0, msg)
+                budget -= msg_tokens
+        return trimmed
+
+    # ------------------------------------------------------------------ #
+    #  Message list builder                                                #
+    # ------------------------------------------------------------------ #
+
+    def _build_user_content(self, context: str, question: str) -> str:
+        """Wrap the current question with retrieved context for the LLM."""
+        return (
+            f"Kontekst:\n{context}\n\n"
+            f"Pitanje: {question}"
+        )
+
+    # ------------------------------------------------------------------ #
+    #  Retrieval with fallback                                              #
+    # ------------------------------------------------------------------ #
+
+    def _retrieve_with_fallback(
+        self,
+        question: str,
+        history: list[dict[str, str]],
+        k: int = 5,
+    ) -> tuple[list[str], list[dict]]:
+        """
+        Try multiple search strategies and return the first that yields
+        results.  Returns (documents, metadatas) — both may be empty.
+        """
+        # ── Strategy 1: rewritten standalone question ─────────────────── #
+        search_query = self._standalone_question(question, history)
+        normalized   = self.translator.normalize_query(search_query)
+        results      = self.vector_store.similarity_search(normalized, k=k)
+        docs, metas  = results["documents"][0], results["metadatas"][0]
+        if docs:
+            logger.info("Retrieval OK (rewritten): %d docs", len(docs))
+            return docs, metas
+
+        # ── Strategy 2: original question verbatim ────────────────────── #
+        logger.info("Fallback 1: trying original question verbatim")
+        normalized = self.translator.normalize_query(question)
+        results    = self.vector_store.similarity_search(normalized, k=k)
+        docs, metas = results["documents"][0], results["metadatas"][0]
+        if docs:
+            logger.info("Retrieval OK (original): %d docs", len(docs))
+            return docs, metas
+
+        # ── Strategy 3: last user message + current question ──────────── #
+        if history:
+            last_user = next(
+                (h["content"] for h in reversed(history) if h.get("role") == "user"),
+                "",
+            )
+            if last_user and last_user != question:
+                combined = f"{last_user} {question}"
+                logger.info("Fallback 2: combined query %r", combined[:120])
+                normalized = self.translator.normalize_query(combined)
+                results    = self.vector_store.similarity_search(normalized, k=k)
+                docs, metas = results["documents"][0], results["metadatas"][0]
+                if docs:
+                    logger.info("Retrieval OK (combined): %d docs", len(docs))
+                    return docs, metas
+
+        logger.warning("All retrieval strategies returned 0 documents")
+        return [], []
+
+    # ------------------------------------------------------------------ #
+    #  Query  (non-streaming)                                              #
+    # ------------------------------------------------------------------ #
+
+    def query(
+        self,
+        question: str,
+        conversation_history: list[dict[str, str]] | None = None,
+        k: int = 5,
+    ) -> dict:
         """
         Retrieve relevant chunks, build a grounded prompt, call the LLM,
         and return the answer alongside formatted source references.
+
+        Parameters
+        ----------
+        question : str
+            The latest user question.
+        conversation_history : list[dict] | None
+            Previous turns as [{"role": "user"|"assistant", "content": "..."}, ...].
+        k : int
+            Number of chunks to retrieve.
 
         Returns
         -------
@@ -145,10 +343,10 @@ Odgovor:""",
             "sources":  list[str],   # human-readable citation lines
         }
         """
-        normalized = self.translator.normalize_query(question)
-        results    = self.vector_store.similarity_search(normalized, k=k)
-        documents  = results["documents"][0]
-        metadatas  = results["metadatas"][0]
+        history = conversation_history or []
+
+        # ── Step 1: Retrieve with fallback ───────────────────────────── #
+        documents, metadatas = self._retrieve_with_fallback(question, history, k=k)
 
         if not documents:
             return {
@@ -157,9 +355,21 @@ Odgovor:""",
                 "sources":  [],
             }
 
+        # ── Step 2: Build messages with full history ──────────────────── #
         context  = self._build_context(documents, metadatas)
-        prompt   = self.prompt_template.format(context=context, question=question)
-        response = self.llm_manager.generate(prompt)
+        history  = self._trim_history(history, context, question)
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+        ]
+        messages.extend(history)
+        messages.append({
+            "role": "user",
+            "content": self._build_user_content(context, question),
+        })
+
+        # ── Step 3: Call LLM via /api/chat ────────────────────────────── #
+        response = self.llm_manager.chat(messages)
         sources  = self._format_sources(metadatas)
 
         return {
@@ -168,19 +378,52 @@ Odgovor:""",
             "sources":  sources,
         }
 
-    async def query_stream(self, question: str) -> AsyncGenerator[str, None]:
-        """Stream response tokens — sources are yielded as a trailing block."""
-        normalized = self.translator.normalize_query(question)
-        results    = self.vector_store.similarity_search(normalized)
-        documents  = results["documents"][0]
-        metadatas  = results["metadatas"][0]
+    # ------------------------------------------------------------------ #
+    #  Query  (streaming)                                                  #
+    # ------------------------------------------------------------------ #
 
+    async def query_stream(
+        self,
+        question: str,
+        conversation_history: list[dict[str, str]] | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream response tokens — sources are yielded as a trailing block.
+
+        Parameters
+        ----------
+        question : str
+            The latest user question.
+        conversation_history : list[dict] | None
+            Previous turns as [{"role": "user"|"assistant", "content": "..."}, ...].
+        """
+        history = conversation_history or []
+
+        # ── Step 1: Retrieve with fallback ───────────────────────────── #
+        documents, metadatas = self._retrieve_with_fallback(question, history)
+
+        if not documents:
+            yield "Nisam pronasao relevantne informacije u bazi znanja za ovo pitanje."
+            return
+
+        # ── Step 2: Build messages with full history ──────────────────── #
         context = self._build_context(documents, metadatas)
-        prompt  = self.prompt_template.format(context=context, question=question)
+        history = self._trim_history(history, context, question)
 
-        async for token in self.llm_manager.generate_stream(prompt):
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": self.SYSTEM_PROMPT},
+        ]
+        messages.extend(history)
+        messages.append({
+            "role": "user",
+            "content": self._build_user_content(context, question),
+        })
+
+        # ── Step 3: Stream from /api/chat ─────────────────────────────── #
+        for token in self.llm_manager.chat_stream(messages):
             yield token
 
+        # ── Step 4: Append sources block ──────────────────────────────── #
         sources = self._format_sources(metadatas)
         if sources:
             yield "\n\n---\nIzvori:\n" + "\n".join(sources)

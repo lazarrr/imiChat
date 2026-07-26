@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "llama3.1:latest"
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_TOKENS: int = 2048
+    LLM_NUM_CTX: int = 8192        # Ollama context window (tokens)
+    LLM_OLLAMA_BASE_URL: str = "http://localhost:11434"
     
     # Embeddings
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"

@@ -1,43 +1,145 @@
 # src/core/llm_manager.py
-from langchain_community.llms import Ollama
-from langchain_core.callbacks import StreamingStdOutCallbackHandler
-from typing import Generator, AsyncGenerator
-import asyncio
+"""
+LLM Manager — wraps Ollama via the official ``ollama`` Python client.
+
+Two interfaces:
+  1.  ollama.chat()      →  /api/chat   (multi-turn conversation)
+  2.  ollama.generate()  →  /api/generate  (fast single-turn, e.g. query-rewrite)
+
+Both explicitly set num_ctx so the context window is never silently truncated.
+Streaming uses the client's native ``stream=True`` — token-by-token, same as v1.
+"""
+
+from __future__ import annotations
+
+from typing import Generator
+
+import ollama
+
 
 class LLMManager:
     def __init__(self, config):
         self.config = config
-        self.llm = self._initialize_llm()
-    
-    def _initialize_llm(self):
-        if self.config.LLM_PROVIDER == "ollama":
-            return Ollama(
-                model=self.config.LLM_MODEL,
-                temperature=self.config.LLM_TEMPERATURE,
-                num_predict=self.config.LLM_MAX_TOKENS,
-                callbacks=[StreamingStdOutCallbackHandler()],
-            )
-        # Add other providers as needed
-    
+        self.model   = config.LLM_MODEL
+        self.temperature = config.LLM_TEMPERATURE
+        self.num_predict = config.LLM_MAX_TOKENS
+        self.num_ctx     = getattr(config, "LLM_NUM_CTX", 8192)
+        self.base_url = getattr(config, "LLM_OLLAMA_BASE_URL", "http://localhost:11434")
+
+        # Create a persistent client so the connection is reused
+        self._client = ollama.Client(host=self.base_url)
+
+    # ------------------------------------------------------------------ #
+    #  Shared options dict                                                #
+    # ------------------------------------------------------------------ #
+
+    @property
+    def _options(self) -> dict:
+        return {
+            "temperature": self.temperature,
+            "num_predict": self.num_predict,
+            "num_ctx": self.num_ctx,
+        }
+
+    # ------------------------------------------------------------------ #
+    #  /api/generate  (simple prompt → completion)                        #
+    # ------------------------------------------------------------------ #
+
     def generate(self, prompt: str) -> str:
-        """Non-streaming generation"""
-        return self.llm.invoke(prompt)
-    
+        """Non-streaming generation via /api/generate"""
+        resp = self._client.generate(
+            model=self.model,
+            prompt=prompt,
+            options=self._options,
+            stream=False,
+        )
+        return resp["response"]
+
     def generate_stream(self, prompt: str) -> Generator[str, None, None]:
+        """Token-by-token streaming via /api/generate"""
+        for chunk in self._client.generate(
+            model=self.model,
+            prompt=prompt,
+            options=self._options,
+            stream=True,
+        ):
+            token = chunk.get("response", "")
+            if token:
+                yield token
+
+    # ------------------------------------------------------------------ #
+    #  /api/chat  (messages list → completion)                            #
+    # ------------------------------------------------------------------ #
+
+    def chat(self, messages: list[dict[str, str]]) -> str:
         """
-        Synchronous streaming generator
-        Yields tokens one by one as they're generated
+        Non-streaming chat via Ollama /api/chat.
+
+        messages: [{"role":"system"|"user"|"assistant", "content":"..."}, ...]
         """
-        # Using langchain's streaming capability
-        for chunk in self.llm.stream(prompt):
-            yield chunk
-    
-    async def generate_stream_async(self, prompt: str) -> AsyncGenerator[str, None]:
+        resp = self._client.chat(
+            model=self.model,
+            messages=messages,
+            options=self._options,
+            stream=False,
+        )
+        return resp["message"]["content"]
+
+    def chat_stream(self, messages: list[dict[str, str]]) -> Generator[str, None, None]:
         """
-        Asynchronous streaming generator
-        Yields tokens one by one as they're generated
+        Token-by-token streaming via Ollama /api/chat.
+
+        Uses the official client's native ``stream=True`` — each chunk
+        is yielded immediately as it arrives from the Ollama server.
         """
-        # Convert synchronous stream to async
-        for chunk in self.llm.stream(prompt):
-            yield chunk
-            await asyncio.sleep(0)  # Allow event loop to switch
+        for chunk in self._client.chat(
+            model=self.model,
+            messages=messages,
+            options=self._options,
+            stream=True,
+        ):
+            token = chunk.get("message", {}).get("content", "")
+            if token:
+                yield token
+
+    # ------------------------------------------------------------------ #
+    #  Query-rewrite helper  (fast, low-token, single-turn)               #
+    # ------------------------------------------------------------------ #
+
+    def rewrite_query(self, history_text: str, latest_question: str) -> str:
+        """
+        Rewrite a follow-up question into a standalone question using the
+        last 1–2 turns of conversation history.
+
+        Uses a short /api/generate call with a small token budget so it's
+        near-instant (< 1 s typical).
+
+        The prompt is in Serbian because both the documents and the
+        conversation are in Serbian (Latin script).
+        """
+        if not history_text.strip():
+            return latest_question
+
+        prompt = (
+            "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
+            "ono postane potpuno samostalno — tako da neko ko ne vidi istoriju "
+            "razgovora moze da razume na sta se pitanje odnosi.\n\n"
+            "Istorija razgovora:\n"
+            f"{history_text}\n\n"
+            "Najnovije pitanje: "
+            f"{latest_question}\n\n"
+            "Vrati SAMO prepisano pitanje, nista drugo. Ne dodaj navodnike, "
+            "objasnjenja ni komentare. Prepisi ga na srpskom latinskom pismu."
+        )
+
+        resp = self._client.generate(
+            model=self.model,
+            prompt=prompt,
+            options={"temperature": 0.0, "num_predict": 128, "num_ctx": 2048},
+            stream=False,
+        )
+        result = resp["response"].strip()
+        # Guard: if the model returned something nonsensical, fall back
+        if not result or len(result) < 3:
+            return latest_question
+        return result

@@ -1,0 +1,246 @@
+{
+  "version": 1,
+  "base_url": "https://imi.pmf.kg.ac.rs/",
+  "urls": {
+    "https://imi.pmf.kg.ac.rs": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460287.000323
+    },
+    "https://imi.pmf.kg.ac.rs/": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460288.940233
+    },
+    "https://imi.pmf.kg.ac.rs/studijski-programi": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460290.1700659
+    },
+    "https://imi.pmf.kg.ac.rs/matematika-studije": {
+      "type": "html",
+      "chunks": 110,
+      "ingested_at": 1783460327.460202
+    },
+    "https://imi.pmf.kg.ac.rs/matematika-studije?osnovne": {
+      "type": "html",
+      "chunks": 110,
+      "ingested_at": 1783460364.582997
+    },
+    "https://imi.pmf.kg.ac.rs/matematika-studije?master": {
+      "type": "html",
+      "chunks": 110,
+      "ingested_at": 1783460401.524318
+    },
+    "https://imi.pmf.kg.ac.rs/matematika-studije?doktorske": {
+      "type": "html",
+      "chunks": 110,
+      "ingested_at": 1783460442.876014
+    },
+    "https://imi.pmf.kg.ac.rs/informatika-studije": {
+      "type": "html",
+      "chunks": 121,
+      "ingested_at": 1783460484.4036071
+    },
+    "https://imi.pmf.kg.ac.rs/upis-studije": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460486.224709
+    },
+    "https://imi.pmf.kg.ac.rs/o-institutu": {
+      "type": "html",
+      "chunks": 6,
+      "ingested_at": 1783460488.855956
+    },
+    "https://imi.pmf.kg.ac.rs/nastavno-osoblje": {
+      "type": "html",
+      "chunks": 7,
+      "ingested_at": 1783460492.434609
+    },
+    "https://imi.pmf.kg.ac.rs/vesti": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460493.9952152
+    },
+    "https://imi.pmf.kg.ac.rs/brucosi": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460495.352412
+    },
+    "https://imi.pmf.kg.ac.rs/oglasna-tabla": {
+      "type": "html",
+      "chunks": 12,
+      "ingested_at": 1783460499.843717
+    },
+    "https://imi.pmf.kg.ac.rs/moodle/": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460501.542484
+    },
+    "https://imi.pmf.kg.ac.rs/rasporedi": {
+      "type": "html",
+      "chunks": 6,
+      "ingested_at": 1783460504.4012642
+    },
+    "https://imi.pmf.kg.ac.rs/raspored-ispita": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460505.782583
+    },
+    "https://imi.pmf.kg.ac.rs/index.php?id=15845": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460507.7256682
+    },
+    "https://imi.pmf.kg.ac.rs/index.php?id=783": {
+      "type": "html",
+      "chunks": 5,
+      "ingested_at": 1783460509.936435
+    },
+    "https://imi.pmf.kg.ac.rs/zavrsni-master-matematika": {
+      "type": "html",
+      "chunks": 6,
+      "ingested_at": 1783460512.521091
+    },
+    "https://imi.pmf.kg.ac.rs/zavrsni-master-informatika": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460514.345381
+    },
+    "https://imi.pmf.kg.ac.rs/index.php?id=782": {
+      "type": "html",
+      "chunks": 4,
+      "ingested_at": 1783460516.3816
+    },
+    "https://imi.pmf.kg.ac.rs/strucna-praksa": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460519.002722
+    },
+    "https://imi.pmf.kg.ac.rs/uslovni-predmeti": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460520.221258
+    },
+    "https://imi.pmf.kg.ac.rs/ppm-grupa-predmeta": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460521.474093
+    },
+    "https://imi.pmf.kg.ac.rs/?id=13671": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460522.721316
+    },
+    "https://imi.pmf.kg.ac.rs/pub/4491abb803e5f117a62711678199d0c6_12062024_103338/Информација о полагању диференцијалних испита.pdf": {
+      "type": "pdf",
+      "chunks": 2,
+      "ingested_at": 1783460524.553963
+    },
+    "https://imi.pmf.kg.ac.rs/projekti-istrazivanja-i-razvoj": {
+      "type": "html",
+      "chunks": 5,
+      "ingested_at": 1783460527.021503
+    },
+    "https://imi.pmf.kg.ac.rs/publikacije-istrazivanja-i-razvoj": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460528.932204
+    },
+    "https://imi.pmf.kg.ac.rs/seminar-scimi-istrazivanja-i-razvoj": {
+      "type": "html",
+      "chunks": 12,
+      "ingested_at": 1783460533.7073522
+    },
+    "https://imi.pmf.kg.ac.rs/kontakt": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460535.0192451
+    },
+    "https://imi.pmf.kg.ac.rs?id=13938": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460536.7154171
+    },
+    "https://imi.pmf.kg.ac.rs?id=13940": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460537.9470809
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18785-raspisan-konkurs-za-stipendije-za-nedostajuca-zanimanja-u-prosveti-za-skolsku-20262027-godine": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460539.497579
+    },
+    "https://imi.pmf.kg.ac.rs/imi-blog": {
+      "type": "html",
+      "chunks": 5,
+      "ingested_at": 1783460542.398592
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18661-engage-2hackathon": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460543.956149
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18742-inovatec-letnja-praksa--iskustvo-koje-gradi-karijeru": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460545.858539
+    },
+    "https://imi.pmf.kg.ac.rs/TEMATCOM2026": {
+      "type": "html",
+      "chunks": 8,
+      "ingested_at": 1783460548.7948768
+    },
+    "https://imi.pmf.kg.ac.rs/kongres": {
+      "type": "html",
+      "chunks": 43,
+      "ingested_at": 1783460561.245965
+    },
+    "https://imi.pmf.kg.ac.rs/office365": {
+      "type": "html",
+      "chunks": 9,
+      "ingested_at": 1783460564.219213
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/5743-naslov.html": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460566.090085
+    },
+    "https://imi.pmf.kg.ac.rs/cemio": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460567.703858
+    },
+    "https://imi.pmf.kg.ac.rs/ceramo": {
+      "type": "html",
+      "chunks": 2,
+      "ingested_at": 1783460569.131883
+    },
+    "http://imi.pmf.kg.ac.rs/mozesit/": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1783460570.5442932
+    },
+    "http://imi.pmf.kg.ac.rs/dms/": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1783460572.496371
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18831-stipendirane-doktorske-studije-na-univerzitetu-u-delaveru-sad": {
+      "type": "html",
+      "chunks": 1,
+      "ingested_at": 1784582119.6395829
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18826-istrazivacka-praksa-u-matematickom-institutu-sanu": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1784582121.480163
+    },
+    "https://imi.pmf.kg.ac.rs/vesti/18823-otvorene-prijave-za-parkup": {
+      "type": "html",
+      "chunks": 3,
+      "ingested_at": 1784582125.144442
+    }
+  }
+}

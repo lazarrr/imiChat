@@ -69,11 +69,19 @@ def print_response(response: dict):
 if __name__ == "__main__":
     qa_system = initialize_system()
 
+    conversation_history: list[dict[str, str]] = []
+
     while True:
         question = input("\nPitanje (ili 'kraj'): ").strip()
         if question.lower() in ("kraj", "quit", "exit"):
             break
+        if question.lower() == "novo":
+            conversation_history = []
+            print("Zapocet novi razgovor.")
+            continue
         if not question:
             continue
-        response = qa_system.query(question)
+        response = qa_system.query(question, conversation_history)
         print_response(response)
+        conversation_history.append({"role": "user", "content": question})
+        conversation_history.append({"role": "assistant", "content": response["answer"]})
