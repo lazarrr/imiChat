@@ -106,7 +106,12 @@ class LLMManager:
     #  Query-rewrite helper  (fast, low-token, single-turn)               #
     # ------------------------------------------------------------------ #
 
-    def rewrite_query(self, history_text: str, latest_question: str) -> str:
+    def rewrite_query(
+        self,
+        history_text: str,
+        latest_question: str,
+        is_unclear: bool = False,
+    ) -> str:
         """
         Rewrite a follow-up question into a standalone question using the
         last 1–2 turns of conversation history.
@@ -114,21 +119,48 @@ class LLMManager:
         Uses a short /api/generate call with a small token budget so it's
         near-instant (< 1 s typical).
 
+        When ``is_unclear`` is True (the question relies on the previous
+        answer, e.g. "give me more information on them"), the previous
+        assistant answer is used as the reference point for resolving the
+        question — NOT the previous user question.
+
         The prompt is in Serbian because both the documents and the
         conversation are in Serbian (Latin script).
         """
         if not history_text.strip():
             return latest_question
 
+        if is_unclear:
+            reference_rule = (
+                "Najnovije pitanje je NEJASNO i oslanja se na kontekst "
+                "prethodnog ODGOVORA asistenta (na primer: 'daj mi vise "
+                "informacija o njima', 'sta je sa tim', 'pojasni'). "
+                "Da bi razresio na sta se pitanje odnosi, koristi iskljucivo "
+                "prethodni ODGOVOR asistenta — ne prethodno pitanje korisnika. "
+                "Zameni nejasne reci konkretnim pojmovima koje je asistent "
+                "naveo u svom odgovoru (npr. nazivi modula, predmeta, "
+                "programa). NE spajaj prethodno pitanje sa najnovijim — "
+                "prethodno pitanje sluzi samo kao kontekst.\n\n"
+            )
+        else:
+            reference_rule = (
+                "Ako se najnovije pitanje odnosi na nesto iz prethodnog "
+                "ODGOVORA asistenta, razresi ga pomocu tog odgovora. "
+                "NE spajaj prethodno pitanje sa najnovijim pitanjem — "
+                "prethodno pitanje sluzi samo kao kontekst za razumevanje.\n\n"
+            )
+
         prompt = (
             "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
             "ono postane potpuno samostalno — tako da neko ko ne vidi istoriju "
             "razgovora moze da razume na sta se pitanje odnosi.\n\n"
-            "Istorija razgovora:\n"
+            "Istorija razgovora (sadrzi i odgovore asistenta):\n"
             f"{history_text}\n\n"
             "Najnovije pitanje: "
             f"{latest_question}\n\n"
-            "Vrati SAMO prepisano pitanje, nista drugo. Ne dodaj navodnike, "
+            "Pravila:\n"
+            + reference_rule
+            + "Vrati SAMO prepisano pitanje, nista drugo. Ne dodaj navodnike, "
             "objasnjenja ni komentare. Prepisi ga na srpskom latinskom pismu."
         )
 

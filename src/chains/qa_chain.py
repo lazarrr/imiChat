@@ -33,6 +33,7 @@ _format_sources() turns that into human-readable citation lines:
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import AsyncGenerator
 
 logger = logging.getLogger(__name__)
@@ -43,11 +44,32 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# ── referential / unclear question markers (Serbian Latin + English) ── #
+# A question matching any of these cannot stand on its own — it refers to
+# something mentioned earlier (usually the previous assistant answer).
+_UNCLEAR_PATTERNS = [
+    r"\bnjih\b", r"\bnjima\b", r"\bnjihov\w*", r"\bnjega\b", r"\bnjemu\b",
+    r"\bih\b", r"\bga\b", r"\bmu\b",
+    r"\bon\b", r"\bona\b", r"\bono\b", r"\boni\b", r"\bone\b",
+    r"\bto\b", r"\bovo\b", r"\btim\b", r"\bte\b", r"\bti\b",
+    r"\bthem\b", r"\bit\b", r"\bthis\b", r"\bthese\b", r"\bthose\b",
+    r"\bthat\b",
+    r"više informacij\w*", r"jos informacij\w*", r"više o\b",
+    r"detaljnij\w*", r"opširnij\w*", r"objasni\w*", r"pojasni\w*",
+    r"nabroj\w*", r"koji su to\b",
+    r"more information", r"tell me more", r"explain\w*", r"elaborate\w*",
+]
+
+_UNCLEAR_REGEX = re.compile(
+    r"(?i)" + "|".join(f"(?:{p})" for p in _UNCLEAR_PATTERNS)
+)
+
+
 class UniversityQASystem:
     # System prompt sent as the first message in every /api/chat call
     SYSTEM_PROMPT = (
         "Vi ste korisni univerzitetski asistent. Odgovarajte na pitanja "
-        "na osnovu prilozenog konteksta iskljucivo na srpskom latinskom pismu. "
+        "na osnovu prilozenog konteksta iskljucivo na srpskom latinicnom pismu. "
         "Ako informacija nije u kontekstu, jasno to navedite. "
         "Kada koristite informacije iz konteksta, referencite izvore u obliku "
         "[Izvor N] unutar odgovora."
@@ -147,13 +169,21 @@ class UniversityQASystem:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _format_history_for_rewrite(history: list[dict[str, str]]) -> str:
+    def _format_history_for_rewrite(
+        history: list[dict[str, str]],
+        include_last_answer: bool = False,
+    ) -> str:
         """
         Convert the last 1–2 turns into a compact text block for the
         query-rewrite prompt.
 
-        Assistant messages are truncated to 300 chars to keep the prompt
+        Assistant messages are truncated to 400 chars to keep the prompt
         focused on the topic rather than the full answer text.
+
+        When ``include_last_answer`` is True (the latest question is
+        unclear and refers back to the previous answer), the most recent
+        assistant message is kept much longer (1200 chars) because it is
+        the reference point that must resolve the question.
 
         Example output:
             User: Koliko ESPB ima predmet Uvod u programiranje?
@@ -164,14 +194,26 @@ class UniversityQASystem:
         # Use at most the last 4 messages (2 full turns)
         recent = history[-4:]
         lines: list[str] = []
-        for msg in recent:
+        for i, msg in enumerate(recent):
             role = msg.get("role", "user")
             label = "Korisnik" if role == "user" else "Asistent"
             content = msg.get("content", "")
-            if role == "assistant" and len(content) > 300:
-                content = content[:300] + "..."
+            is_last = i == len(recent) - 1
+            if role == "assistant":
+                limit = 1200 if (include_last_answer and is_last) else 400
+                if len(content) > limit:
+                    content = content[:limit] + "..."
             lines.append(f"{label}: {content}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _is_unclear_question(question: str) -> bool:
+        """
+        True if the question cannot stand on its own — it contains
+        pronouns or follow-up phrases ("more information", "explain",
+        "njih", "them"...) that refer to earlier context.
+        """
+        return bool(_UNCLEAR_REGEX.search(question))
 
     # ------------------------------------------------------------------ #
     #  Query contextualization  (Fix #2)                                   #
@@ -185,18 +227,28 @@ class UniversityQASystem:
         question using conversation history, so that embedding-based
         retrieval works correctly for follow-up questions.
 
+        When the question is unclear (pronouns / "more information"-type
+        follow-ups), the previous *assistant answer* is passed as the
+        reference context so the rewrite resolves "them" → the actual
+        entities from the previous answer (e.g. module names).
+
         If there is no history or the rewrite fails, the original question
         is returned unchanged.
         """
         if not history:
             return question
 
-        history_text = self._format_history_for_rewrite(history)
+        unclear = self._is_unclear_question(question)
+        history_text = self._format_history_for_rewrite(
+            history, include_last_answer=unclear
+        )
         if not history_text.strip():
             return question
 
-        rewritten = self.llm_manager.rewrite_query(history_text, question)
-        logger.info("Query rewrite: %r → %r", question, rewritten)
+        rewritten = self.llm_manager.rewrite_query(
+            history_text, question, is_unclear=unclear
+        )
+        logger.info("Query rewrite (unclear=%s): %r → %r", unclear, question, rewritten)
 
         rewritten_stripped = rewritten.strip()
 
@@ -293,7 +345,25 @@ class UniversityQASystem:
             logger.info("Retrieval OK (original): %d docs", len(docs))
             return docs, metas
 
-        # ── Strategy 3: last user message + current question ──────────── #
+        # ── Strategy 3: last assistant answer + current question ─────── #
+        # For unclear follow-ups ("more info on them") the previous answer
+        # contains the entities the question refers to.
+        if history:
+            last_answer = next(
+                (h["content"] for h in reversed(history) if h.get("role") == "assistant"),
+                "",
+            )
+            if last_answer and len(last_answer) > 10:
+                combined = f"{last_answer[:800]} {question}"
+                logger.info("Fallback 2: query + last answer %r", combined[:120])
+                normalized = self.translator.normalize_query(combined)
+                results    = self.vector_store.similarity_search(normalized, k=k)
+                docs, metas = results["documents"][0], results["metadatas"][0]
+                if docs:
+                    logger.info("Retrieval OK (with last answer): %d docs", len(docs))
+                    return docs, metas
+
+        # ── Strategy 4: last user message + current question ──────────── #
         if history:
             last_user = next(
                 (h["content"] for h in reversed(history) if h.get("role") == "user"),
@@ -301,7 +371,7 @@ class UniversityQASystem:
             )
             if last_user and last_user != question:
                 combined = f"{last_user} {question}"
-                logger.info("Fallback 2: combined query %r", combined[:120])
+                logger.info("Fallback 3: combined query %r", combined[:120])
                 normalized = self.translator.normalize_query(combined)
                 results    = self.vector_store.similarity_search(normalized, k=k)
                 docs, metas = results["documents"][0], results["metadatas"][0]
