@@ -199,6 +199,39 @@ environment variables or a `.env` file (see `.env.example`).
 | Streaming returns a single chunk | Ensure `langchain-community` is installed |
 | Cyrillic answers when you want Latin | Set `DEFAULT_SCRIPT=latinc` or pass `"script":"latinic"` in the API request |
 
+## Web UI (Flutter)
+
+A modern web chat interface lives in [`web_ui/`](web_ui/). It talks to the
+FastAPI server above (streaming via SSE, multi-turn sessions, source
+citations, dark mode, persisted conversations).
+
+### Run (development)
+
+```bash
+# 1. Backend
+conda activate uni
+python -m src.api.main
+
+# 2. Frontend (another terminal)
+cd web_ui
+flutter run -d chrome --web-port 5000
+```
+
+The frontend targets `http://localhost:8000` by default. Point it at a
+different backend with a query parameter:
+
+```
+http://localhost:5000/?api=http://other-host:8000
+```
+
+### Build for production
+
+```bash
+cd web_ui
+flutter build web --release
+# static output in web_ui/build/web — serve with any static file server
+```
+
 ## Tests
 
 ```bash
