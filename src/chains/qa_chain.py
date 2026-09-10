@@ -70,9 +70,9 @@ class UniversityQASystem:
     SYSTEM_PROMPT = (
         "Vi ste korisni univerzitetski asistent. Odgovarajte na pitanja "
         "na osnovu prilozenog konteksta iskljucivo na srpskom latinicnom pismu. "
-        "Ako informacija nije u kontekstu, jasno to navedite. "
-        "Kada koristite informacije iz konteksta, referencite izvore u obliku "
-        "[Izvor N] unutar odgovora."
+        "Ako informacija nije u kontekstu, jasno to navedite sa odgovorom da nemate "
+        "informaciju i tu prekidas sa komunikacijom i ne prikazuj izvore. "
+        "Kada koristite informacije iz konteksta, referneciraj izvore "
     )
 
     def __init__(self, llm_manager, vector_store, translator):
