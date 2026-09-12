@@ -72,10 +72,8 @@ class _ChatInputState extends State<ChatInput> {
               enabled: widget.enabled,
               minLines: 1,
               maxLines: 6,
-              textInputAction: TextInputAction.newline,
-              onSubmitted: (_) {
-                if (!_controller.text.contains('\n')) _submit();
-              },
+              textInputAction: TextInputAction.send,
+              onSubmitted: (_) => _submit(),
               style: theme.textTheme.bodyMedium?.copyWith(
                 fontSize: 14.5,
                 height: 1.45,

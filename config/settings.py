@@ -6,7 +6,9 @@ class Settings(BaseSettings):
     LLM_PROVIDER: str = "ollama"  # ollama or llama_cpp
     LLM_MODEL: str = "llama3.1:latest"
     LLM_TEMPERATURE: float = 0.0
-    LLM_MAX_TOKENS: int = 2048
+    # Upper bound on generated answers (tokens). Kept low so responses stay
+    # concise and generation finishes quickly on CPU.
+    LLM_MAX_TOKENS: int = 512
     LLM_NUM_CTX: int = 8192        # Ollama context window (tokens)
     LLM_OLLAMA_BASE_URL: str = "http://localhost:11434"
     
@@ -22,8 +24,25 @@ class Settings(BaseSettings):
     
     # Retrieval
     TOP_K_RESULTS: int = 5
+    # Follow-ups asking for additional information about the previous answer
+    # retrieve deeper so the model gets new chunks instead of repeating.
+    MORE_INFO_TOP_K: int = 10
     SIMILARITY_THRESHOLD: float = 0.7
-    
+    RETRIEVAL_CANDIDATES: int = 30      # per-retriever pool size before fusion
+    HYBRID_RETRIEVAL_ENABLED: bool = False  # BM25 fusion disabled; dense cosine only
+    RRF_K: int = 60                     # Reciprocal Rank Fusion constant
+    BM25_FUSION_WEIGHT: float = 0.1     # dense rank weight is always 1.0
+    BM25_CACHE_PATH: str = "./data/vector_store/bm25_cache.pkl"
+
+    # Cross-encoder rerank (optional, CPU-friendly multilingual model)
+    RERANK_ENABLED: bool = False
+    RERANK_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
+    RERANK_CANDIDATES: int = 20
+
+    # Query rewrite
+    REWRITE_TIMEOUT_SECONDS: float = 12.0
+    REWRITE_SEED: int = 42           # fixed sampling seed → reproducible rewrites
+
     # Translation
     DEFAULT_SCRIPT: str = "latinc"  # or "cyrillic"
     

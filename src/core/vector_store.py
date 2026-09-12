@@ -14,6 +14,7 @@ Key fixes applied here (see previous review for full context):
 
 import os
 import hashlib
+import logging
 
 import chromadb
 import numpy as np
@@ -23,6 +24,8 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 # Reuse the same header/footer-aware loaders used by DocumentProcessor
 from src.processing.document_loader import DocumentProcessor
+
+logger = logging.getLogger(__name__)
 
 
 class VectorStoreManager:
@@ -61,18 +64,28 @@ class VectorStoreManager:
     #  Embeddings                                                          #
     # ------------------------------------------------------------------ #
 
-    def create_embeddings(self, texts: list[str], is_query: bool = False) -> np.ndarray:
+    def create_embeddings(
+        self,
+        texts: list[str],
+        is_query: bool = False,
+        show_progress_bar: bool | None = None,
+    ) -> np.ndarray:
         """
         Encode texts with the correct E5 prefix.
           is_query=False  →  'passage: '  (index / add time)
           is_query=True   →  'query: '    (search time)
+
+        Progress bars are only shown while indexing; single queries default
+        to ``show_progress_bar=False`` to keep the logs quiet.
         """
         prefix = self.QUERY_PREFIX if is_query else self.PASSAGE_PREFIX
         prefixed = [prefix + t for t in texts]
+        if show_progress_bar is None:
+            show_progress_bar = not is_query
         return self.embeddings_model.encode(
             prefixed,
             normalize_embeddings=True,
-            show_progress_bar=True,
+            show_progress_bar=show_progress_bar,
         )
 
     # ------------------------------------------------------------------ #
@@ -91,6 +104,22 @@ class VectorStoreManager:
         except Exception:
             return False
 
+    def fetch_corpus(self) -> dict:
+        """
+        Return the entire collection as
+        ``{"ids": [...], "documents": [...], "metadatas": [...]}``.
+
+        Used to build the BM25 index; reading does not require the
+        embedding model.
+        """
+        collection = self.client.get_collection("university_knowledge")
+        result = collection.get(include=["documents", "metadatas"])
+        return {
+            "ids": list(result.get("ids") or []),
+            "documents": list(result.get("documents") or []),
+            "metadatas": list(result.get("metadatas") or []),
+        }
+
     # ------------------------------------------------------------------ #
     #  Indexing                                                            #
     # ------------------------------------------------------------------ #
@@ -104,7 +133,7 @@ class VectorStoreManager:
           • File paths (str) — .docx or .pdf, with headers/footers stripped
         """
         if not documents:
-            print("Warning: no documents supplied")
+            logger.warning("No documents supplied")
             return
 
         # ── Resolve file paths to LangChain Document objects ──────────── #
@@ -112,7 +141,7 @@ class VectorStoreManager:
             processed: list = []
             for file_path in documents:
                 if not os.path.isfile(file_path):
-                    print(f"Warning: file not found — {file_path}")
+                    logger.warning("File not found — %s", file_path)
                     continue
                 ext = os.path.splitext(file_path)[1].lower()
                 if ext in (".docx", ".pdf"):
@@ -121,10 +150,10 @@ class VectorStoreManager:
                     chunks = self._loader.process_file(file_path)
                     processed.extend(chunks)
                 else:
-                    print(f"Warning: unsupported file type '{ext}' — {file_path}")
+                    logger.warning("Unsupported file type '%s' — %s", ext, file_path)
 
             if not processed:
-                print("Warning: no valid documents were loaded from paths")
+                logger.warning("No valid documents were loaded from paths")
                 return
             documents = processed
 
@@ -149,7 +178,7 @@ class VectorStoreManager:
             metadatas=metadata,
             ids=ids,
         )
-        print(f"Upserted {len(texts)} chunks into 'university_knowledge'.")
+        logger.info("Upserted %d chunks into 'university_knowledge'.", len(texts))
 
     # ------------------------------------------------------------------ #
     #  Retrieval                                                           #
@@ -160,11 +189,16 @@ class VectorStoreManager:
         Search the collection and return results filtered by
         SIMILARITY_THRESHOLD.  ChromaDB distances are cosine distances,
         so a similarity of 0.7 maps to a maximum allowed distance of 0.3.
+
+        The result keeps chunk ids so the hybrid retriever can fuse this
+        ranking with the BM25 ranking by a common key.
         """
         collection = self.client.get_collection("university_knowledge")
 
         # Use the query prefix — this is critical for E5 retrieval quality
-        query_embedding = self.create_embeddings([query], is_query=True)[0]
+        query_embedding = self.create_embeddings(
+            [query], is_query=True, show_progress_bar=False
+        )[0]
 
         results = collection.query(
             query_embeddings=[query_embedding.tolist()],
@@ -173,23 +207,27 @@ class VectorStoreManager:
         )
 
         # Apply threshold filter
-        filtered_docs, filtered_meta, filtered_dists = [], [], []
-        for doc, meta, dist in zip(
+        filtered_ids, filtered_docs, filtered_meta, filtered_dists = [], [], [], []
+        for chunk_id, doc, meta, dist in zip(
+            results["ids"][0],
             results["documents"][0],
             results["metadatas"][0],
             results["distances"][0],
         ):
             if dist <= self.distance_threshold:
+                filtered_ids.append(chunk_id)
                 filtered_docs.append(doc)
                 filtered_meta.append(meta)
                 filtered_dists.append(dist)
             else:
-                print(
-                    f"Filtered out chunk (distance {dist:.3f} "
-                    f"> threshold {self.distance_threshold:.3f})"
+                logger.debug(
+                    "Filtered out chunk (distance %.3f > threshold %.3f)",
+                    dist,
+                    self.distance_threshold,
                 )
 
         return {
+            "ids": [filtered_ids],
             "documents": [filtered_docs],
             "metadatas": [filtered_meta],
             "distances": [filtered_dists],

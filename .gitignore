@@ -47,7 +47,8 @@ data/processed/
 
 # ===== LLM model files =====
 # Downloaded models (Ollama, Hugging Face, llama.cpp) — too large for git
-models/
+# Anchored to the repo root so it does not swallow web_ui/lib/models/.
+/models/
 *.gguf
 *.ggml
 *.bin

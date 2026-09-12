@@ -26,7 +26,12 @@ from pydantic import BaseModel
 from config.settings import settings
 from src.core.vector_store import VectorStoreManager
 from src.core.llm_manager import LLMManager
-from src.chains.qa_chain import UniversityQASystem
+from src.chains.qa_chain import (
+    RetrievedIdsChunk,
+    SourcesChunk,
+    TokenChunk,
+    UniversityQASystem,
+)
 from src.processing.translator import ScriptTranslator
 from src.processing.document_loader import DocumentProcessor
 
@@ -47,7 +52,8 @@ app.add_middleware(
 #  In-memory session store                                            #
 # ------------------------------------------------------------------ #
 #  session_id → {"history": [{"role": ..., "content": ...}, ...],
-#                 "last_access": float}
+#                "chunk_ids": [ids of chunks used in the last turn],
+#                "last_access": float}
 # ------------------------------------------------------------------ #
 
 SESSION_TTL = 3600  # 1 hour — sessions older than this are pruned
@@ -63,28 +69,56 @@ def _get_history(session_id: str | None) -> list[dict[str, str]]:
     return sessions[session_id]["history"]
 
 
+def _get_used_chunk_ids(session_id: str | None) -> list[str]:
+    """Ids of the chunks that produced the previous answer in this session.
+
+    Passed back to the QA system so that a follow-up asking for additional
+    information can exclude them and retrieve new chunks.
+    """
+    if not session_id or session_id not in sessions:
+        return []
+    return list(sessions[session_id].get("chunk_ids") or [])
+
+
 def _clean_answer(answer: str) -> str:
-    """Strip the trailing source citation block so it does not pollute
-    the conversation history that is fed back to the LLM on future turns."""
-    idx = answer.rfind("\n\n---\n")
+    """Strip a trailing ``Izvori:`` citation block so it does not pollute
+    the conversation history that is fed back to the LLM on future turns.
+
+    The streaming path no longer appends the block (sources travel in a
+    dedicated SSE event), but old sessions and the non-streaming path may
+    still contain one.
+    """
+    marker = "\n\n---\nIzvori:"
+    idx = answer.rfind(marker)
     if idx != -1:
         return answer[:idx].strip()
     return answer
+
+
+def _sse(payload: dict) -> str:
+    """Encode a payload as a Server-Sent Events frame (UTF-8, unescaped)."""
+    return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _save_turn(
     session_id: str | None,
     question: str,
     answer: str,
+    chunk_ids: list[str] | None = None,
 ) -> None:
     """Append a user/assistant turn to the session history."""
     if not session_id:
         return
     if session_id not in sessions:
-        sessions[session_id] = {"history": [], "last_access": time.time()}
+        sessions[session_id] = {
+            "history": [],
+            "chunk_ids": [],
+            "last_access": time.time(),
+        }
     hist = sessions[session_id]["history"]
     hist.append({"role": "user", "content": question})
     hist.append({"role": "assistant", "content": _clean_answer(answer)})
+    sessions[session_id]["chunk_ids"] = list(chunk_ids or [])
     sessions[session_id]["last_access"] = time.time()
 
 
@@ -167,28 +201,39 @@ async def _stream_response(
 ) -> AsyncGenerator[str, None]:
     """
     Core streaming logic:
-      1. Retrieve conversation history for session.
-      2. Stream tokens from QA system.
-      3. Accumulate the full answer.
-      4. Save the completed turn to session history.
+      1. Retrieve conversation history + previously used chunk ids.
+      2. Stream tokens from the QA system (citations validated inline).
+      3. Emit a structured ``sources`` event.
+      4. Save the completed turn (with its chunk ids) to session history.
+      5. Emit ``done``.
     """
     history = _get_history(session_id)
+    exclude_chunk_ids = _get_used_chunk_ids(session_id)
     _prune_sessions()  # occasional cleanup
 
     accumulated: list[str] = []
+    used_chunk_ids: list[str] = []
 
     try:
-        async for token in qa_system.query_stream(question, history):
-            accumulated.append(token)
-            yield f"data: {json.dumps({'token': token})}\n\n"
+        async for chunk in qa_system.query_stream(
+            question, history, exclude_chunk_ids=exclude_chunk_ids
+        ):
+            if isinstance(chunk, TokenChunk):
+                accumulated.append(chunk.text)
+                yield _sse({"token": chunk.text})
+            elif isinstance(chunk, SourcesChunk):
+                yield _sse({"sources": chunk.sources})
+            elif isinstance(chunk, RetrievedIdsChunk):
+                used_chunk_ids = list(chunk.chunk_ids)
 
         full_answer = "".join(accumulated)
-        _save_turn(session_id, question, full_answer)
+        _save_turn(session_id, question, full_answer, used_chunk_ids)
 
-        yield f"data: {json.dumps({'done': True})}\n\n"
+        yield _sse({"done": True})
 
     except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        logger.exception("Streaming failed")
+        yield _sse({"error": str(e)})
 
 
 @app.get("/health")

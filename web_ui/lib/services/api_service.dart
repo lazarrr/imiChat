@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../models/chat_message.dart';
+
 /// Minimal API client for the FastAPI chatbot backend.
 ///
 /// Uses [http.Client.send] so we can consume the Server-Sent Events
@@ -101,6 +103,15 @@ class ApiService {
         yield StreamEvent.error(data['error'].toString());
         return;
       }
+      final rawSources = data['sources'];
+      if (rawSources is List) {
+        final sources = rawSources
+            .whereType<Map<String, dynamic>>()
+            .map(ChatSource.fromJson)
+            .toList();
+        yield StreamEvent.sources(sources);
+        continue;
+      }
       final token = data['token'];
       if (token is String && token.isNotEmpty) {
         yield StreamEvent.token(token);
@@ -117,6 +128,7 @@ sealed class StreamEvent {
   const StreamEvent();
 
   const factory StreamEvent.token(String text) = TokenEvent;
+  const factory StreamEvent.sources(List<ChatSource> sources) = SourcesEvent;
   const factory StreamEvent.error(String message) = ErrorEvent;
   const factory StreamEvent.done() = DoneEvent;
 }
@@ -124,6 +136,15 @@ sealed class StreamEvent {
 class TokenEvent extends StreamEvent {
   const TokenEvent(this.text);
   final String text;
+}
+
+/// Structured citations emitted by the backend right before `done`.
+///
+/// Text-parsing the trailing `--- Izvori:` block is kept as a fallback in
+/// [splitSources] for messages stored before this event existed.
+class SourcesEvent extends StreamEvent {
+  const SourcesEvent(this.sources);
+  final List<ChatSource> sources;
 }
 
 class ErrorEvent extends StreamEvent {

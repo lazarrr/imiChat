@@ -5,242 +5,452 @@
     "https://imi.pmf.kg.ac.rs": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460287.000323
+      "ingested_at": 1789215382.5205839,
+      "context": "Stranica Institut za matematiku i informatiku na PMF Kragujevaca sadrži informacije o raznim odsekima i programima, kao i novosti i događaji vezani za ove oblasti. Ovde se mogu naći informacije o studijima, nastavnicima, oglasima, stručnoj praksi i drugim relevantnim podacima.",
+      "questions": [
+        "Šta je prvi program naveden na stranici o stručnoj praksi?",
+        "Koji je ZFS i zašto je u velikoj meri revolucionisao način na koji se upravlja podacima?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460288.940233
+      "ingested_at": 1789215396.304221,
+      "context": "Stranica Institut za matematiku i informatiku na PMF Kragujevac sažima razne informacije o institutu, uključujući odeljke za studije, nastavnike, novosti, blogove i partnerstva. Takođe, sadrži informacije o stručnoj praksi i regionalnim takmičenjima.",
+      "questions": [
+        "Šta je China International College Students’ Innovation Competition 2026?",
+        "Koji su partneri Institut za matematiku i informatiku?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/studijski-programi": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460290.1700659
+      "ingested_at": 1789215404.4457521,
+      "context": "Stranica sadrži informacije o studijskim programima na fakultetu Matematike i Informatike, uključujući detalje o programima za matematiku i informatiku.",
+      "questions": [
+        "Šta se nalazi na stranici Studijski programi na fakultetu Matematike i Informatike?",
+        "Koje su dostupni studijski programi na ovoj stranici?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/matematika-studije": {
       "type": "html",
       "chunks": 110,
-      "ingested_at": 1783460327.460202
+      "ingested_at": 1789215464.3732538,
+      "context": "Stranica predstavlja informacije o studijima matematike na Institutu za matematiku i informatiku, uključujući strukтуру studijskih programa, predmete, zvanja i drugačije detalje. Ovdje se nalazi opis različitih modula i izbornih predmeta, kao i ciljevi studija.",
+      "questions": [
+        "Što je matematika prema opisanju na stranici?",
+        "Što se organizuje u tri modula u studijskom programu matematike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/matematika-studije?osnovne": {
       "type": "html",
       "chunks": 110,
-      "ingested_at": 1783460364.582997
+      "ingested_at": 1789215524.5653381,
+      "context": "Stranica predstavlja informacije o studijima matematike na Institutu za matematiku i informatiku, uključujući strukтуру studijskih programa, predmete, zvanja i drugačije detalje. Ovdje se nalazi opis studija matematike, uključujući njihove karakteristike i mogućnosti za dalje usavršavanje.",
+      "questions": [
+        "Što je matematika prema opisima na stranici?",
+        "Što se događa sa prvoj godinom studija matematike u novom studijskom programu Osnovnih akademskih studija?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/matematika-studije?master": {
       "type": "html",
       "chunks": 110,
-      "ingested_at": 1783460401.524318
+      "ingested_at": 1789215583.098121,
+      "context": "Stranica omogućava pristup informacijama o studijima matematike na Institutu za matematiku i informatiku, uključujući strukтуру studijskih programa, predmete, zvanja i drugačije detalje. Takođe, sadržaj opisuje misiju i viziju instituta u okviru obrazovanja i razvoja matematičara.",
+      "questions": [
+        "Što je matematika prema definiciji na stranici?",
+        "Što se organizuje u tri modula u studijskim programima matematike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/matematika-studije?doktorske": {
       "type": "html",
       "chunks": 110,
-      "ingested_at": 1783460442.876014
+      "ingested_at": 1789215642.28051,
+      "context": "Stranica omogućava pristup informacijama o studijima matematike na Institutu za matematiku i informatiku, uključujući detalje o studijskim programima, predmetima i zvanjima. Takođe, sadržaj opisuje misiju i viziju instituta kao i osnovne karakteristike studijskih programa.",
+      "questions": [
+        "Što je matematika prema definiciji prezentiranoj na stranici?",
+        "Što je misija i vizija Institut za matematiku i informatiku prema sadržaju stranice?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/informatika-studije": {
       "type": "html",
-      "chunks": 121,
-      "ingested_at": 1783460484.4036071
+      "chunks": 123,
+      "ingested_at": 1789215707.761666,
+      "context": "Stranica predstavlja studije informatike na Institutu za matematiku i informatiku, uključujući detalje o studijskim programima, predmetima i zvanjima koje studenti dobijaju po završetku studija.",
+      "questions": [
+        "Koje su osnovne zvanične zvanja koje studenti dobijaju po završetku studija informatike?",
+        "Šta se uči na modulu Računarske nauke i Softversko inženjerstvo?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/upis-studije": {
       "type": "html",
       "chunks": 2,
-      "ingested_at": 1783460486.224709
+      "ingested_at": 1789215727.251171,
+      "context": "Stranica sadrži informacije o припремном програму за пријемни испит из математике на Природно-математичком факултету Универзитета у Крагујевцу. Програм uključuje серију учења по темама као што су линеарна и квадратна функција, ирационалне једначине, полиноми и тд., које се одржавају у хибридном формату од 28. 02. 2026. до 23. 05. 2026.",
+      "questions": [
+        "Када почиње припремна настава?",
+        "Шта се уче у првом термину припремног програма?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/o-institutu": {
       "type": "html",
       "chunks": 6,
-      "ingested_at": 1783460488.855956
+      "ingested_at": 1789215747.715109,
+      "context": "Stranica predstavlja Institut za matematiku i informatiku na Prirodno-matematičkom fakultetu u Kragujevcu, koji se specializira u oblastima matematike i informatike, a čiji nastavnici i asistenti objavljuju naučne radove u međunarodnim časopisima i organiziraju međunarodne konferencije.",
+      "questions": [
+        "Što je najvažnije u radu Institut za matematiku i informatiku?",
+        "Koje su najrazvijene oblasti rada u Institutu za matematiku i informatiku?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/nastavno-osoblje": {
       "type": "html",
       "chunks": 7,
-      "ingested_at": 1783460492.434609
+      "ingested_at": 1789215771.4367108,
+      "context": "Stranica sadrži informacije o nastavnom osoblju Instituta za matematiku i informatiku na PMF Kragujevskoj. Tamo su navedeni imena, zvanja, kabineti, e-mail adrese i vremena konsultacija nastavnika i saradnika.",
+      "questions": [
+        "Koji je upravnik Instituta za matematiku i informatiku?",
+        "Koje su vremena konsultacija dr. Dejan Bojovića?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/vesti": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460493.9952152
+      "ingested_at": 1789215780.691875,
+      "context": "Stranica sadrži obavijest o šestomesečnoj plaćenoj stručnoj praksi u kompaniji 'Forma Ideale' d.o.o. Kragujevac, dostupno studentima završnih godina osnovnih i master akademskih studija.",
+      "questions": [
+        "Koji je naziv kompanije gdje se održava stručna praksa?",
+        "Koje studijske godine studenti mogu prati ovu stručnu praksu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/brucosi": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460495.352412
+      "ingested_at": 1789215790.8995898,
+      "context": "Stranica sadrži informacije za brucoše na Prirodno-matematičkom fakultetu, uključujući mogućnosti korišćenja Office 365 i drugih web servisa, kao i pravilnike za polaganje ispitova.",
+      "questions": [
+        "Šta je Office 365 i za šta se može koristiti?",
+        "Koje web servise su dostupni studentima Instituta za matematiku i informatiku?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/oglasna-tabla": {
       "type": "html",
-      "chunks": 12,
-      "ingested_at": 1783460499.843717
+      "chunks": 11,
+      "ingested_at": 1789215821.553015,
+      "context": "Oglasna tabla stranice IMI PMF Kragujevac sadrži razne oglase vezane za nastavnike, stručnu praksu, rezultate ispitnih kolokvijuma i drugu vežbu u Instituti za matematiku i informatiku. Oglase se mogu pretraživati prema naslovu oglasa ili imenu autora.",
+      "questions": [
+        "Šta se događa 15.09.2026. u 9h.?",
+        "Koji je datum i vreme održavanja iskaza za kandidata Nikole Mladenovića?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/moodle/": {
       "type": "html",
       "chunks": 2,
-      "ingested_at": 1783460501.542484
+      "ingested_at": 1789215833.8588731,
+      "context": "Stranica predstavlja elektronski portal za učenje Instituta za matematiku i informatiku na Prirodno-matematičkom fakultetu Univerziteta u Kragujevcu. Portal omogućava pristup kursevima i oglasnim tabelama za prijavljenih korisnike.",
+      "questions": [
+        "Šta se događa kada korisnici imaju nalog na IMI portalu?",
+        "Kako proveriti ispravnost e-mail adrese u profilu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/rasporedi": {
       "type": "html",
       "chunks": 6,
-      "ingested_at": 1783460504.4012642
+      "ingested_at": 1789215854.9664378,
+      "context": "Stranica sadrži informacije o rasporedima časova i ispita za studente fakulteta Matematike i Informatike, uključujući rasporede predavanja, vežbi, kao i rasporede za ispite za različite studijske programove. Takođe, stranica sadrži popis nastavnika i sale u kojima se predavanja održavaju.",
+      "questions": [
+        "Koje studijske programove se menju na ovoj stranici?",
+        "Koji nastavnici su uključeni u raspored časova na ovoj stranici?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/raspored-ispita": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460505.782583
+      "ingested_at": 1789215868.26162,
+      "context": "Stranica sadrži informacije o rasporedu ispita za fakultet Matematike i informatike, uključujući rasporede za letnji i januarsko-februarski semestar 2025/26, kao i rasporede za osnovne i master studije u oba predmeta. Takođe se navede pravilnik o polaganju ispita i odluka o sprečavanju sukoba interesa.",
+      "questions": [
+        "Šta se nalazi u pravilniku o polaganju ispita?",
+        "Kada je raspored ispitnog roka za osnovne i master studije matematike u junem i septembru 2025/26?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/index.php?id=15845": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460507.7256682
+      "ingested_at": 1789215885.461591,
+      "context": "Stranica sadrži informacije o završnim radovima na osnovnim akademskim studijama matematike, uključujući pravilnike i obrasci za prijавu, izradu i odbranu završnog rada, kao i spisak tema za akademsku godinu 2025/2026.",
+      "questions": [
+        "Šta se uključuje u pravilnike o prijavi, izradi i odbrani završnog rada?",
+        "Koje su teme dostupne za izbor studencima za akademsku godinu 2025/2026?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/index.php?id=783": {
       "type": "html",
       "chunks": 5,
-      "ingested_at": 1783460509.936435
+      "ingested_at": 1789215903.4220119,
+      "context": "Stranica opisuje postupak prijave teme i izrade završnog rada na osnovnim studijima informatike na PMF-KG. Opisuje se proces odabira teme, prijave, radionog perioda, odbrane i potrebe za raznim dokumentima.",
+      "questions": [
+        "Koje je najkasnije vreme za prijavu teme završnog rada na osnovnim studijima informatike?",
+        "Šta se mora student dostaviti mentoru najkasnije do 10. avgusta tekuće školske godine?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/zavrsni-master-matematika": {
       "type": "html",
       "chunks": 6,
-      "ingested_at": 1783460512.521091
+      "ingested_at": 1789215926.587966,
+      "context": "Ova stranica sadrži informacije o master radovima koji se mogu izvesti na Master akademskim studijama matematike na PMF-u Kragujevačke akademije. Takođe, navedeni su podaci o temama i nastavnicima koji će voditi te radove za školsku godinu 2025/2026.",
+      "questions": [
+        "Koje su teme master radova za školsku godinu 2025/2026 na Master akademskim studijama matematike?",
+        "Koji nastavnici će voditi master radove za školsku godinu 2025/2026 na Master akademskim studijama matematike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/zavrsni-master-informatika": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460514.345381
+      "ingested_at": 1789215941.460716,
+      "context": "Stranica sadrži informacije o master radovima koji se obavlja na Master akademskim studijima informatike na PMF Kragujevac. Tamo se nalazi lista tema za master radove, nastavnički voditelji svakog radia i rokove za odbranu.",
+      "questions": [
+        "Šta je rok za odbranu master rada od datuma izbora teme?",
+        "Koje su teme za master radove na Master akademskim studijama informatike na PMF Kragujevac?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/index.php?id=782": {
       "type": "html",
       "chunks": 4,
-      "ingested_at": 1783460516.3816
+      "ingested_at": 1789215957.4329119,
+      "context": "Stranica sadrži informacije o postupku prijave i izrade diplomskog rada po starom programu na Fakultetu matematike i informatike. Opisuje se kako studenti mogu izabrati temu, popuniti formular za izradu rada i obavljaju komisiju za odbranu.",
+      "questions": [
+        "Kako se studenti dogovaraju o tehničkim detaljima izrade diplomskog rada?",
+        "Koliko dana pre odbrane mora biti prijavljena odbrana diplomskog rada?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/strucna-praksa": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460519.002722
+      "ingested_at": 1789215973.243538,
+      "context": "Stranica omogućava pristup informacijama o stručnoj praksi za studente Prirodno-matematičkog fakulteta, uključujući specifikacije prakse, rokove za prijavu, tehnologije koje se koriste i druga važna informacije.",
+      "questions": [
+        "Koje su rokove za prijavu na stručnu praksu u Inovatecu?",
+        "Koje tehnologije se koriste u praksi u HTec Kragujevcu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/uslovni-predmeti": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460520.221258
+      "ingested_at": 1789215981.516417,
+      "context": "Stranica sadrži linkove do različitih sekcija univerzitetskog veb sajta, uključujući sekciju o uslovnim predmetima za studij Matematika Informatika.",
+      "questions": [
+        "Koji su dostupni predmeti u sekciji uslovni predmeti?",
+        "Da li je dostupna informacija o uslovnim predmetima za Matematiku Informatiku?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/ppm-grupa-predmeta": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460521.474093
+      "ingested_at": 1789215990.286528,
+      "context": "Stranica predstavlja informacije o PPM grupi predmeta na PMF-u Kragujevačke univerzije za studij Matematika Informatika, uključujući linkove do različitih sekcija sa relevantnim informacijama.",
+      "questions": [
+        "Koji su predmeti koji se nalaze u PPM grupi predmeta za studij Matematika Informatika?",
+        "Gde se nalazi oglasna tabla za PPM grupu predmeta?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/?id=13671": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460522.721316
+      "ingested_at": 1789215999.515149,
+      "context": "Stranica sadrži informacije o informatičkim predmetima na fakultetu Matematike i Informatike, uključujući predmete na Osnovnom akademskom studiju (OAS) i Magistarskom akademskom studiju (MAS) matematike.",
+      "questions": [
+        "Koje predmete se nalaze na Osnovnom akademskom studiju matematike?",
+        "Koje predmete se nalaze na Magistarskom akademskom studiju matematike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/pub/4491abb803e5f117a62711678199d0c6_12062024_103338/Информација о полагању диференцијалних испита.pdf": {
       "type": "pdf",
       "chunks": 2,
-      "ingested_at": 1783460524.553963
+      "ingested_at": 1789216013.908344,
+      "context": "Stranica sadrži obaveštenje za studente master studija koji su u obavezi da polagaju diferencijalne ispite. Obaveštenje opisuje dva moguća načina polaganja ovih ispitnih obaveza i potrebu za prijavom u Studentsku službu.",
+      "questions": [
+        "Koliko načina polaganja predispitnih obaveza i završnih ispitnih deo ima prema obaveštenju?",
+        "Šta treba studentima u Kragujevcu da učinisu ukoliko žele da polaže celokupan ispit u apsolventskim rokovima?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/projekti-istrazivanja-i-razvoj": {
       "type": "html",
       "chunks": 5,
-      "ingested_at": 1783460527.021503
+      "ingested_at": 1789216037.644473,
+      "context": "Stranica prikazuje naučno-istraživačke projekte koji su realizovani na Institutu za matematiku i informatiku Prirodno-matematičkog fakulteta u Kragujevcu od 2011. do 2015. godine. Projekti se podijeljuju u tri kategorije: projekti integralnih i interdisciplinarnih istraživanja, projekti osnovnih istraživanja i tehnološki projekti.",
+      "questions": [
+        "Koje su kategorije projekata koji su realizovani na Institutu za matematiku i informatiku od 2011. do 2015. godine?",
+        "Koji su rukovoditelji projekata integralnih i interdisciplinarnih istraživanja?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/publikacije-istrazivanja-i-razvoj": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460528.932204
+      "ingested_at": 1789216053.7002492,
+      "context": "Stranica prikazuje publikacije Instituta Matematike i Informatike na Prirodno-matematičkom fakultetu Kragujevac, uključujući naučne časopise i izdanja autorstva nastavnika i saradnika.",
+      "questions": [
+        "Šta su neka od najnovijih izdanja udžbenika i zbiraka zadataka autora Instituta Matematike i Informatike?",
+        "Koje su naučne časopise objavljene od strane Instituta Matematike i Informatike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/seminar-scimi-istrazivanja-i-razvoj": {
       "type": "html",
       "chunks": 12,
-      "ingested_at": 1783460533.7073522
+      "ingested_at": 1789216085.611412,
+      "context": "Stranica predstavlja ScIMI - Naučni seminar Instituta za matematiku i informatiku, koji je pokrenut u skladu sa planovima doktorskih akademskih studija i obavezi studenata da održe predavanja. Seminar drži zaposleni nastavnici, saradnici instituta i gosti iz zemlje i inostranstva.",
+      "questions": [
+        "Ko je rukovodilac Seminara ScIMI?",
+        "Koje su predavanje i datum sledećeg predavanja u Seminaru ScIMI?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/kontakt": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460535.0192451
+      "ingested_at": 1789216094.030735,
+      "context": "Stranica sadrži informacije o načinu na koji se može dovesti Institut za matematiku i informatiku na Prirodno-matematičkom fakultetu Univerziteta u Kragujevcu.",
+      "questions": [
+        "Kako dostiti Institut za matematiku i informatiku?",
+        "Ko je upravnik Instituta za matematiku i informatiku?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs?id=13938": {
       "type": "html",
       "chunks": 2,
-      "ingested_at": 1783460536.7154171
+      "ingested_at": 1789216107.696577,
+      "context": "Stranica sadrži informacije o upisu na studij Matematika Informatika za akademski godine 2026/2027, uključujući podatke o prelikvim rangu, rešenja prijemnog ispita, probnom prijemnom ispitu i besplatnoj pripremnoj nastavi.",
+      "questions": [
+        "Kada će biti održan probni prijemni ispit za upis na studije Matematika Informatika?",
+        "Kako se može prijaviti na besplatnu pripremnu nastavu iz matematike?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs?id=13940": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460537.9470809
+      "ingested_at": 1789216117.58787,
+      "context": "Stranica sadrži informacije o alumnima univerziteta, uključujući link na stranicu specifično prilagođenu alumnima. Takođe, stranica menja svoj sadržaj kako bi se uključio novi sadržaj u izradi.",
+      "questions": [
+        "Koji je naziv stranice koja je specifično prilagođena alumnima?",
+        "Da li je menjanje sadržaja stranice u toku i ako da, šta se uključuje u ovaj proces?"
+      ]
     },
-    "https://imi.pmf.kg.ac.rs/vesti/18785-raspisan-konkurs-za-stipendije-za-nedostajuca-zanimanja-u-prosveti-za-skolsku-20262027-godine": {
+    "https://imi.pmf.kg.ac.rs/vesti/18882-forma-ideale-strucna-praksa": {
       "type": "html",
-      "chunks": 2,
-      "ingested_at": 1783460539.497579
+      "chunks": 1,
+      "ingested_at": 1789216126.926741,
+      "context": "Stranica sadrži obavijest o plaćenoj stručnoj praksi za studente završne godine osnovnih i master akademskih studija Informatike ili Matematike organiziranoj kompanijom 'Forma Ideale' d.o.o. Kragujevac.",
+      "questions": [
+        "Koja je dužina programa stručne prakse?",
+        "Koji studijani su upućeni da se prijave za praksu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/imi-blog": {
       "type": "html",
       "chunks": 5,
-      "ingested_at": 1783460542.398592
+      "ingested_at": 1789216146.073705,
+      "context": "Stranica sadrži članke o operativnim sistemima, virtuelizaciji, umrežavanju, big data, programiranju i drugim tehnološkim temama. Sadržaj je napisan studentima informatike PMF-a u Kragujevcu.",
+      "questions": [
+        "Koji je najnoviji članak na stranici?",
+        "Šta je ZFS i zašto je revolucionisao način na koji se menja fajlovski sistem?"
+      ]
     },
-    "https://imi.pmf.kg.ac.rs/vesti/18661-engage-2hackathon": {
+    "https://imi.pmf.kg.ac.rs/vesti/18881-china-international-college-students-innovation-competition-2026": {
       "type": "html",
-      "chunks": 2,
-      "ingested_at": 1783460543.956149
+      "chunks": 4,
+      "ingested_at": 1789216164.137247,
+      "context": "Stranica opisuje regionalno takmičenje China International College Students’ Innovation Competition 2026, koje će se održati u Srbiji u saradnji sa Zhejiang University iz Kine i Instituta za pojas i put Beograd. Takmičenje je usmereno na podsticanje inovacija i preduzetništva mladih, a studenti visokoškolskih ustanova u Srbiji mogu učestvovati sa svojim idejama i projekatima.",
+      "questions": [
+        "Šta je China International College Students’ Innovation Competition 2026?",
+        "Koji su osnovni uslovi za učešće u ovom takmičenju?"
+      ]
     },
-    "https://imi.pmf.kg.ac.rs/vesti/18742-inovatec-letnja-praksa--iskustvo-koje-gradi-karijeru": {
+    "https://imi.pmf.kg.ac.rs/vesti/18836-microsoft-development-center-serbia-praksa": {
       "type": "html",
-      "chunks": 3,
-      "ingested_at": 1783460545.858539
+      "chunks": 6,
+      "ingested_at": 1789216176.6961331,
+      "context": "Stranica opisuje praksu za studente u Microsoft Development Center Serbia, koja se održava od novembra 2026. Trajanje prakse je 16 nedelja sa 30 sati po nedelji.",
+      "questions": [
+        "Koliko je trajanje prakse u satima po nedelji?",
+        "Koja su ključna zadaća studenta u ovom programu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/TEMATCOM2026": {
       "type": "html",
       "chunks": 8,
-      "ingested_at": 1783460548.7948768
+      "ingested_at": 1789216207.754154,
+      "context": "Stranica opisuje Drugu konferenciju o naстави математике и информатике (TEMATCOM 2026), која се одржава у Крагујевцу, Мај 29-30, 2026. Ова конференција је национална са међународним учешћем и има циљ размене научних резултата и добрих пракси у настави математике и информатике.",
+      "questions": [
+        "Када и где се одржава TEMATCOM 2026?",
+        "Шта су званични језици конференције TEMATCOM 2026?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/kongres": {
       "type": "html",
       "chunks": 43,
-      "ingested_at": 1783460561.245965
+      "ingested_at": 1789216240.74105,
+      "context": "Stranica predstavlja 14. Srpski matematički kongres koji se održao u Kragujevcu od 16. do 19. maj 2018. godine. Konačno, stranica sadrži detalje o programu kongresa, poljima matematike i računarske nauke u kojima se održavaju radionice, te o časopisima u kojima će biti objavljeni izabrani radovi.",
+      "questions": [
+        "Koji su polja matematike i računarske nauke u kojima se održavaju radionice na 14. Srpskom matematičkom kongresu?",
+        "U kojim časopisima će biti objavljeni izabrani radovi sa 14. Srpskog matematičkog kongresa?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/office365": {
       "type": "html",
       "chunks": 9,
-      "ingested_at": 1783460564.219213
+      "ingested_at": 1789216268.330073,
+      "context": "Stranica opisuje Office 365 for Education paket, koji omogućava studentima i zaposlenim na Prirodno-matematičkom fakultetu u Kragujevcu besplatno korišćenje najnovijih edukativnih servisa umrežavanja i saradnje. Ovi servisi uključuju Office Online, 1 TB OneDrive skladišta, Yammer, SharePoint, kao i druge korisne alate za komunikaciju i organizaciju.",
+      "questions": [
+        "Šta omogućavaju studentima i zaposlenim na Prirodno-matematičkom fakultetu u Kragujevcu besplatno korišćenje preko Office 365 for Education?",
+        "Koje alate i usluge uključuju Office 365 for Education paket?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/vesti/5743-naslov.html": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460566.090085
+      "ingested_at": 1789216285.8521001,
+      "context": "Stranica opisuje program ECDL sertifikacije na Prirodno-matematičkom fakultetu u Kragujevcu, koji omogućava studentima da dobiju ECDL Start sertifikat na osnovu položenih ispita iz predmeta Softverski alati, Softverski alati 1 i Primena računara. Takođe, stranica objašnjava kako do sertifikata dođe i nudi dodatne informacije o ceni i dostupnosti sertifikata.",
+      "questions": [
+        "Šta je ECDL sertifikat i kakva je njegova vrednost?",
+        "Kako može student dobiti ECDL Start sertifikat na Prirodno-matematičkom fakultetu u Kragujevcu?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/cemio": {
       "type": "html",
       "chunks": 2,
-      "ingested_at": 1783460567.703858
+      "ingested_at": 1789216298.879935,
+      "context": "Stranica predstavlja CeMIO - Centar za matematičko i informatičko obrazovanje na PMF-u u Kragujevcu. CeMIO pruža obrazovne i uslužne delatnosti kojima se osnovni cilj je unapređivanje kvaliteta matematičkog i informatičkog obrazovanja na različitim nivoima.",
+      "questions": [
+        "Što je CeMIO i koja je njegova osnovna misao?",
+        "Koji su glavni ciljevi CeMIO-a u radu sa učenicima i studentima?"
+      ]
     },
     "https://imi.pmf.kg.ac.rs/ceramo": {
       "type": "html",
       "chunks": 2,
-      "ingested_at": 1783460569.131883
+      "ingested_at": 1789216313.621152,
+      "context": "Stranica opisuje Centar za računarsko modelovanje i optimizaciju CERAMO, organizacionu celinu pri Institutu za matematiku i informatiku, koja se bavi naučno-istraživačkim i razvojnim delatnostima u oblastima računarskog modelovanja i računarske optimizacije. Delatnost centra pokriva razvoj fizičkih i podatkovnih modela, kao i optimizaciju proizvoda i procesa.",
+      "questions": [
+        "Šta je Centar za računarsko modelovanje i optimizaciju CERAMO?",
+        "Koja su glavne oblasti delatnosti Centra za računarsko modelovanje i optimizacije CERAMO?"
+      ]
     },
     "http://imi.pmf.kg.ac.rs/mozesit/": {
       "type": "html",
       "chunks": 1,
-      "ingested_at": 1783460570.5442932
+      "ingested_at": 1789216324.456585,
+      "context": "Stranica možešIT opisuje radionicu organizовану у Институту за математику и информатику КГУ има Комтреада за среднjoшколце. Тема радионаце је 'Gaming with Unity', а рок за пријаву се завршава 31. марта 2017. године.",
+      "questions": [
+        "Када ће почети радионаца?",
+        "Како можемо пријавити се на радионацу?"
+      ]
     },
     "http://imi.pmf.kg.ac.rs/dms/": {
       "type": "html",
       "chunks": 3,
-      "ingested_at": 1783460572.496371
-    },
-    "https://imi.pmf.kg.ac.rs/vesti/18831-stipendirane-doktorske-studije-na-univerzitetu-u-delaveru-sad": {
-      "type": "html",
-      "chunks": 1,
-      "ingested_at": 1784582119.6395829
-    },
-    "https://imi.pmf.kg.ac.rs/vesti/18826-istrazivacka-praksa-u-matematickom-institutu-sanu": {
-      "type": "html",
-      "chunks": 3,
-      "ingested_at": 1784582121.480163
-    },
-    "https://imi.pmf.kg.ac.rs/vesti/18823-otvorene-prijave-za-parkup": {
-      "type": "html",
-      "chunks": 3,
-      "ingested_at": 1784582125.144442
+      "ingested_at": 1789216343.301661,
+      "context": "Ova stranica opisuje Подружницу Друштва математичара Србије Крагујевац, укључujuћи њену организацију, статут, чланове органима и информације о упису у Регистар удружења. Тук се такође налазе контакти и начин на који се могу поставити као члан Подружнице.",
+      "questions": [
+        "Који је председник Подружнице Друштва математичара Србије Крагујевац?",
+        "На који жиро рачун се мора новац за чланарину Подружнице уплаћивати?"
+      ]
     }
   }
 }

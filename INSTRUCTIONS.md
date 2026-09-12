@@ -180,15 +180,21 @@ curl -X POST http://localhost:8000/chat/stream \
   -d '{"question":"Koliko ESPB ima Uvod u programiranje?"}'
 ```
 
-Response is **Server-Sent Events** (SSE) — tokens arrive one by one:
+Response is **Server-Sent Events** (SSE) — tokens arrive one by one, followed
+by a structured `sources` event and a final `done` marker:
 ```
 data: {"token":"Predmet"}
 data: {"token":" Uvod"}
 data: {"token":" u"}
 ...
-data: {"token":"\n\n---\nIzvori:\n[1] informatika_oas_2021.pdf — strana 12"}
+data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12"}]}
 data: {"done":true}
 ```
+
+Source numbers come from a single per-query citation registry shared by the
+inline `[Izvor N]` tags and the `sources` event, so they can never renumber.
+On a refusal the `sources` list is empty; the server no longer appends a
+textual `--- Izvori:` block to the stream.
 
 ### Multi-turn conversation (with session)
 
@@ -206,13 +212,26 @@ curl -X POST http://localhost:8000/chat/stream \
 
 **What the chatbot does internally on turn 2:**
 1. Detects this is a follow-up (session `abc123` has history).
-2. Calls Llama 3.1 to rewrite `"Koji su preduslovi za njega?"` →
-   `"Koji su preduslovi za Uvod u programiranje?"`.
-3. Embeds the **rewritten** question (with `query: ` prefix) and
-   retrieves relevant chunks from ChromaDB.
+2. Skips the LLM rewrite if a heuristic already considers the question
+   standalone. Purely referential follow-ups (`"Šta možeš o njima?"`) also
+   skip the LLM entirely and retrieve with the previous question — the exact
+   query that produced the context being asked about — so the same follow-up
+   always retrieves the same chunks. Other follow-ups call Llama 3.1
+   (bounded by a timeout, temperature 0, fixed seed) to rewrite them using
+   the previous *questions and answers*; successful rewrites are cached by
+   `(history, question)` so they are reproducible, and a rewrite that drifts
+   from the conversation topic is rejected. On failure, timeout or rejection
+   a deterministic fallback retrieves with the previous clear question (plus
+   the new one when it has its own topic).
+3. Embeds the **rewritten** question (with `query: ` prefix) and retrieves
+   relevant chunks with hybrid dense (E5) + BM25 search, fused by
+   Reciprocal Rank Fusion. If that returns nothing, the original question
+   is retried verbatim (no other fallbacks).
 4. Sends the full message list (system prompt + history + new
    context-augmented question) to Ollama `/api/chat`.
-5. Streams the answer token-by-token + appends `--- Izvori:` block.
+5. Streams the answer token-by-token, validating `[Izvor N]` markers as
+   they arrive (invalid numbers are never emitted) and emits a structured
+   `sources` event; refusals carry no sources.
 6. Saves both the original question and answer to the session history.
 
 Sessions expire after **1 hour** of inactivity.
@@ -284,9 +303,32 @@ Three fixes were applied to enable proper multi-turn conversations:
 ### Citations
 
 Every retrieved chunk carries metadata (`source`, `filename`, `type`, `page`, `url`).
-The LLM sees chunks tagged as `[Izvor 1 — filename, strana N]` and can
-reference them inline.  The API appends a `--- Izvori:` block with
-deduplicated, human-readable citations.
+A single `CitationRegistry` deduplicates `(source, page)` pairs and assigns
+each one a stable `[Izvor N]` number. The LLM sees chunks tagged as
+`[Izvor N — filename, strana M]` and the API emits the very same numbering
+in the structured `sources` SSE event. Citations whose number is not in the
+registry are stripped, and refusals suppress sources entirely.
+
+### Retrieval
+
+Dense retrieval (`intfloat/multilingual-e5-large`) ranks chunks by cosine
+similarity in ChromaDB. An optional lexical BM25 stage can be fused in with
+weighted Reciprocal Rank Fusion by setting `HYBRID_RETRIEVAL_ENABLED=true`
+(`BM25_FUSION_WEIGHT`, default `0.1`) — it is disabled for now, so only the
+cosine similarity search runs, and the BM25 cache is not loaded. An optional
+cross-encoder rerank (`mmarco-mMiniLMv2`) can be enabled with
+`RERANK_ENABLED=true`.
+
+### Evaluation
+
+A small golden set lives in `data/eval/golden_set.json`. It scores
+retrieval hit@k, citation validity/grounding and refusal rates:
+
+```bash
+python scripts/eval_golden.py --with-llm          # full evaluation
+python scripts/eval_golden.py                     # retrieval metrics only
+python scripts/eval_golden.py --no-hybrid         # dense-only ablation
+```
 
 ---
 

@@ -1,9 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
 import '../theme.dart';
+
+Future<void> _openLink(String url) async {
+  final uri = Uri.tryParse(url);
+  if (uri == null) return;
+  if (!uri.isScheme('http') && !uri.isScheme('https')) return;
+  try {
+    await launchUrl(uri, webOnlyWindowName: '_blank');
+  } catch (_) {
+    // Launching is unavailable (e.g. in tests) — silently ignore.
+  }
+}
 
 class MessageBubble extends StatelessWidget {
   const MessageBubble({super.key, required this.message});
@@ -109,6 +121,10 @@ class _AssistantBubble extends StatelessWidget {
     final theme = Theme.of(context);
     final isDark = theme.brightness == Brightness.dark;
     final result = splitSources(message.content);
+    // Prefer the structured sources event; fall back to parsing the
+    // legacy trailing `--- Izvori:` block.
+    final sources =
+        message.sources.isNotEmpty ? message.sources : result.sources;
 
     return Container(
       padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
@@ -134,13 +150,16 @@ class _AssistantBubble extends StatelessWidget {
             MarkdownBody(
               data: result.text,
               selectable: true,
+              onTapLink: (text, href, title) {
+                if (href != null) _openLink(href);
+              },
               styleSheet: _markdownStyle(context, isDark),
             ),
           if (message.streaming && result.text.isNotEmpty)
             const _StreamingCursor(),
-          if (result.sources.isNotEmpty) ...[
+          if (sources.isNotEmpty) ...[
             const SizedBox(height: 12),
-            _SourcesCard(sources: result.sources),
+            _SourcesCard(sources: sources),
           ],
         ],
       ),
@@ -192,7 +211,7 @@ MarkdownStyleSheet _markdownStyle(BuildContext context, bool isDark) {
 class _SourcesCard extends StatelessWidget {
   const _SourcesCard({required this.sources});
 
-  final List<String> sources;
+  final List<ChatSource> sources;
 
   @override
   Widget build(BuildContext context) {
@@ -233,7 +252,7 @@ class _SourcesCard extends StatelessWidget {
             runSpacing: 6,
             children: [
               for (final source in sources)
-                _SourceChip(raw: source, isDark: isDark),
+                _SourceChip(source: source, isDark: isDark),
             ],
           ),
         ],
@@ -243,19 +262,18 @@ class _SourcesCard extends StatelessWidget {
 }
 
 class _SourceChip extends StatelessWidget {
-  const _SourceChip({required this.raw, required this.isDark});
+  const _SourceChip({required this.source, required this.isDark});
 
-  final String raw;
+  final ChatSource source;
   final bool isDark;
 
   @override
   Widget build(BuildContext context) {
-    // Format: "[1] informatika_oas_2021.pdf — strana 12"
-    final match = RegExp(r'^\[(\d+)\]\s*(.*)$').firstMatch(raw.trim());
-    final number = match?.group(1) ?? '·';
-    final label = match?.group(2)?.trim() ?? raw.trim();
+    final number = source.number > 0 ? '${source.number}' : '·';
+    final label = source.displayLabel;
+    final hasUrl = source.url.isNotEmpty;
 
-    return Container(
+    final chip = Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       decoration: BoxDecoration(
         color: isDark
@@ -298,7 +316,26 @@ class _SourceChip extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
             ),
           ),
+          if (hasUrl) ...[
+            const SizedBox(width: 6),
+            Icon(
+              Icons.open_in_new_rounded,
+              size: 13,
+              color: isDark ? const Color(0xFFC7CDFB) : const Color(0xFF3B3F66),
+            ),
+          ],
         ],
+      ),
+    );
+
+    if (!hasUrl) return chip;
+
+    return Tooltip(
+      message: 'Otvori izvor',
+      child: InkWell(
+        onTap: () => _openLink(source.url),
+        borderRadius: BorderRadius.circular(20),
+        child: chip,
       ),
     );
   }

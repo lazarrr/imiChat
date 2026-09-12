@@ -1,0 +1,46 @@
+[
+  {
+    "question": "Kada će biti održan probni prijemni ispit za upis na studije 2026/2027?",
+    "expected_sources": ["UPIS 2026/2027"]
+  },
+  {
+    "question": "Koji projekat se bavi razvojem sistema za podršku optimalnom održavanju visokih brana u Srbiji?",
+    "expected_sources": ["Projekti"]
+  },
+  {
+    "question": "Koji naučni časopisi se objavljuju na Institutu za matematiku i informatiku?",
+    "expected_sources": ["Publikacije"]
+  },
+  {
+    "question": "Koji je ISSN naučnog časopisa Kragujevac Journal of Mathematics?",
+    "expected_sources": ["Publikacije"]
+  },
+  {
+    "question": "Ko je koordinator naučnog komiteta 14. srpskog matematičkog kongresa?",
+    "expected_sources": ["14th Serbian Mathematical Congress"]
+  },
+  {
+    "question": "Koje teme za master rad nudi Miloš Ivanović na master akademskim studijama informatike?",
+    "expected_sources": ["Master rad na Master akademskim studijama informatike"]
+  },
+  {
+    "question": "Kako se studenti mogu prijaviti za Office 365 for Education?",
+    "expected_sources": ["Office 365 for Education"]
+  },
+  {
+    "question": "Ko je autor blog teksta FreeRTOS – Rate Monotonic Scheduling?",
+    "expected_sources": ["Blog"]
+  },
+  {
+    "question": "Šta piše u obaveštenju o polaganju diferencijalnih ispita za studente master studija?",
+    "expected_sources": ["диференцијалних"]
+  },
+  {
+    "question": "Koji je glavni grad Australije?",
+    "expect_refusal": true
+  },
+  {
+    "question": "Koliko iznosi cena mesečne karte za voz Beograd–Bar?",
+    "expect_refusal": true
+  }
+]

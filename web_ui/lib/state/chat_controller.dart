@@ -169,6 +169,9 @@ class ChatController extends ChangeNotifier {
           case TokenEvent(:final text):
             assistant.content += text;
             break;
+          case SourcesEvent(:final sources):
+            assistant.sources = List.of(sources);
+            break;
           case ErrorEvent(:final message):
             lastError.add(message);
             break;
@@ -196,6 +199,15 @@ class ChatController extends ChangeNotifier {
     assistant.streaming = false;
     if (assistant.content.isEmpty) {
       assistant.content = error ?? 'Server je vratio prazan odgovor.';
+    }
+    // Fallback: an older backend (or a persisted message) may deliver the
+    // sources as a trailing `--- Izvori:` block instead of a sources event.
+    if (assistant.sources.isEmpty) {
+      final parsed = splitSources(assistant.content);
+      if (parsed.sources.isNotEmpty) {
+        assistant.sources = parsed.sources;
+        assistant.content = parsed.text;
+      }
     }
     convo.touch();
     _persist();

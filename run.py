@@ -70,6 +70,7 @@ if __name__ == "__main__":
     qa_system = initialize_system()
 
     conversation_history: list[dict[str, str]] = []
+    used_chunk_ids: list[str] = []
 
     while True:
         question = input("\nPitanje (ili 'kraj'): ").strip()
@@ -77,11 +78,15 @@ if __name__ == "__main__":
             break
         if question.lower() == "novo":
             conversation_history = []
+            used_chunk_ids = []
             print("Zapocet novi razgovor.")
             continue
         if not question:
             continue
-        response = qa_system.query(question, conversation_history)
+        response = qa_system.query(
+            question, conversation_history, exclude_chunk_ids=used_chunk_ids
+        )
         print_response(response)
+        used_chunk_ids = list(response.get("chunk_ids") or [])
         conversation_history.append({"role": "user", "content": question})
         conversation_history.append({"role": "assistant", "content": response["answer"]})

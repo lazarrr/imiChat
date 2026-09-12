@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:uni_chat_web/services/api_service.dart';
 
 void main() {
-  test('chatStream parses SSE tokens, done and health', () async {
+  test('chatStream parses SSE tokens, sources, done and health', () async {
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
     final port = server.port;
 
@@ -33,6 +33,21 @@ void main() {
         await req.response.flush();
         req.response.write('data: ${jsonEncode({'token': 'vo!'})}\n\n');
         await req.response.flush();
+        req.response.write(
+          'data: ${jsonEncode({
+                'sources': [
+                  {
+                    'number': 1,
+                    'filename': 'informatika.pdf',
+                    'page': 12,
+                    'url': '',
+                    'type': 'pdf',
+                    'label': 'informatika.pdf — strana 12',
+                  }
+                ]
+              })}\n\n',
+        );
+        await req.response.flush();
         req.response.write('data: {"done":true}\n\n');
         await req.response.close();
         return;
@@ -45,10 +60,15 @@ void main() {
 
     final events =
         await api.chatStream(question: 'Pitanje?', sessionId: 'abc123').toList();
-    expect(events, hasLength(3));
+    expect(events, hasLength(4));
     expect((events[0] as TokenEvent).text, 'Zdra');
     expect((events[1] as TokenEvent).text, 'vo!');
-    expect(events[2], isA<DoneEvent>());
+    final sourcesEvent = events[2] as SourcesEvent;
+    expect(sourcesEvent.sources, hasLength(1));
+    expect(sourcesEvent.sources.first.number, 1);
+    expect(sourcesEvent.sources.first.filename, 'informatika.pdf');
+    expect(sourcesEvent.sources.first.page, 12);
+    expect(events[3], isA<DoneEvent>());
 
     final health = await api.healthCheck();
     expect(health.healthy, isTrue);
