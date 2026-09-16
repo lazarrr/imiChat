@@ -1,18 +1,24 @@
 # src/core/llm_manager.py
 """
-LLM Manager — wraps Ollama via the official ``ollama`` Python client.
+LLM Manager — talks to either a local Ollama server or a remote
+OpenAI-compatible server (``/v1/chat/completions``).
 
-Two interfaces:
-  1.  ollama.chat()      →  /api/chat   (multi-turn conversation)
-  2.  ollama.generate()  →  /api/generate  (fast single-turn, e.g. query-rewrite)
+Backend selection is driven by the ``LLM_USE_LOCAL`` setting:
+  * ``True``  → official ``ollama`` Python client (local inference)
+  * ``False`` → remote OpenAI-compatible HTTP API (``requests``)
+
+Both expose the same two interfaces:
+  1.  chat()      → multi-turn conversation
+  2.  generate()  → fast single-turn (e.g. query-rewrite)
 
 Both explicitly set num_ctx so the context window is never silently truncated.
-Streaming uses the client's native ``stream=True`` — token-by-token, same as v1.
+Streaming is token-by-token from either backend.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor
@@ -21,6 +27,7 @@ from threading import Lock
 from typing import Generator
 
 import ollama
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +38,142 @@ _REWRITE_SEED = 42
 _REWRITE_CACHE_SIZE = 256
 
 
+class _OpenAICompatibleClient:
+    """
+    Minimal OpenAI-compatible client (``POST {base_url}/chat/completions``).
+
+    Exposes the subset of the ``ollama.Client`` interface that
+    :class:`LLMManager` relies on — ``chat`` / ``generate``, streaming or
+    not — and maps Ollama-style options (``num_predict``, ``seed``) onto
+    their OpenAI-compatible counterparts (``max_tokens``, ``seed``).
+    """
+
+    def __init__(self, base_url: str, api_key: str = "", timeout: float = 300.0):
+        self.base_url = (base_url or "").rstrip("/")
+        self.api_key = api_key
+        self.timeout = timeout
+        self._session = requests.Session()
+
+    def _headers(self) -> dict[str, str]:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _payload(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict | None,
+        stream: bool,
+    ) -> dict:
+        options = options or {}
+        payload: dict = {"model": model, "messages": messages, "stream": stream}
+        if options.get("temperature") is not None:
+            payload["temperature"] = options["temperature"]
+        if options.get("num_predict") is not None:
+            payload["max_tokens"] = options["num_predict"]
+        if options.get("seed") is not None:
+            payload["seed"] = options["seed"]
+        if options.get("repeat_penalty") is not None:
+            # Ollama's OpenAI layer maps frequency_penalty to
+            # repeat_penalty = 1 + frequency_penalty.
+            payload["frequency_penalty"] = min(
+                2.0, max(0.0, float(options["repeat_penalty"]) - 1.0)
+            )
+        return payload
+
+    def _post(self, payload: dict) -> requests.Response:
+        url = f"{self.base_url}/chat/completions"
+        response = self._session.post(
+            url,
+            json=payload,
+            headers=self._headers(),
+            stream=bool(payload.get("stream")),
+            timeout=(10, self.timeout),
+        )
+        if response.status_code >= 400:
+            logger.error(
+                "Remote LLM request to %s failed with HTTP %s: %s",
+                url,
+                response.status_code,
+                response.text[:500],
+            )
+            response.raise_for_status()
+        return response
+
+    def chat(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        options: dict | None = None,
+        stream: bool = False,
+    ):
+        response = self._post(self._payload(model, messages, options, stream))
+        if stream:
+            return self._iter_stream(response)
+        content = _OpenAICompatibleClient._json(response)["choices"][0]["message"]["content"]
+        return {"message": {"role": "assistant", "content": content}}
+
+    def generate(
+        self,
+        model: str,
+        prompt: str,
+        options: dict | None = None,
+        stream: bool = False,
+    ):
+        messages = [{"role": "user", "content": prompt}]
+        if stream:
+            response = self._post(self._payload(model, messages, options, True))
+            return self._iter_generate_stream(response)
+        result = self.chat(model, messages, options, stream=False)
+        return {"response": result["message"]["content"]}
+
+    @staticmethod
+    def _iter_stream(response: requests.Response):
+        for token in _OpenAICompatibleClient._iter_tokens(response):
+            yield {"message": {"content": token}}
+
+    @staticmethod
+    def _iter_generate_stream(response: requests.Response):
+        for token in _OpenAICompatibleClient._iter_tokens(response):
+            yield {"response": token}
+
+    @staticmethod
+    def _json(response: requests.Response) -> dict:
+        # Decode explicitly as UTF-8: the server may omit the charset from
+        # Content-Type, in which case requests falls back to ISO-8859-1 and
+        # mangles Serbian diacritics (č, ć, š, ž, đ).
+        return json.loads(response.content.decode("utf-8"))
+
+    @staticmethod
+    def _iter_tokens(response: requests.Response):
+        # Same charset caveat as _json: SSE responses (text/event-stream)
+        # carry no charset, so decode the raw bytes as UTF-8 ourselves
+        # instead of letting requests guess ISO-8859-1.
+        for raw_line in response.iter_lines(decode_unicode=False):
+            if not raw_line:
+                continue
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if line.startswith("data:"):
+                line = line[len("data:"):].strip()
+            if line == "[DONE]":
+                break
+            if not line:
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                logger.debug("Ignoring non-JSON stream chunk: %r", line)
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            token = (choices[0].get("delta") or {}).get("content")
+            if token:
+                yield token
+
+
 class LLMManager:
     # Dedicated pool so a slow rewrite can be abandoned on timeout without
     # blocking the request.  The in-flight HTTP call finishes in the
@@ -39,14 +182,35 @@ class LLMManager:
 
     def __init__(self, config):
         self.config = config
-        self.model   = config.LLM_MODEL
         self.temperature = config.LLM_TEMPERATURE
         self.num_predict = config.LLM_MAX_TOKENS
         self.num_ctx     = getattr(config, "LLM_NUM_CTX", 8192)
-        self.base_url = getattr(config, "LLM_OLLAMA_BASE_URL", "http://localhost:11434")
+        self.repeat_penalty = float(getattr(config, "LLM_REPEAT_PENALTY", 1.2))
+        self.repeat_last_n  = int(getattr(config, "LLM_REPEAT_LAST_N", 256))
+        self.use_local   = bool(getattr(config, "LLM_USE_LOCAL", False))
 
-        # Create a persistent client so the connection is reused
-        self._client = ollama.Client(host=self.base_url)
+        if self.use_local:
+            self.model = config.LLM_MODEL
+            self.base_url = getattr(
+                config, "LLM_OLLAMA_BASE_URL", "http://localhost:11434"
+            )
+            # Persistent client so the connection is reused
+            self._client = ollama.Client(host=self.base_url)
+        else:
+            self.model = getattr(config, "LLM_REMOTE_MODEL", "") or config.LLM_MODEL
+            self.base_url = getattr(config, "LLM_REMOTE_BASE_URL", "")
+            self._client = _OpenAICompatibleClient(
+                base_url=self.base_url,
+                api_key=getattr(config, "LLM_REMOTE_API_KEY", ""),
+                timeout=float(getattr(config, "LLM_REMOTE_TIMEOUT", 300.0)),
+            )
+
+        logger.info(
+            "LLM backend: %s (%s @ %s)",
+            "local Ollama" if self.use_local else "remote OpenAI-compatible",
+            self.model,
+            self.base_url,
+        )
 
         self.rewrite_seed = int(getattr(config, "REWRITE_SEED", _REWRITE_SEED))
         self._rewrite_cache: OrderedDict[str, str] = OrderedDict()
@@ -87,6 +251,8 @@ class LLMManager:
             "temperature": self.temperature,
             "num_predict": self.num_predict,
             "num_ctx": self.num_ctx,
+            "repeat_penalty": self.repeat_penalty,
+            "repeat_last_n": self.repeat_last_n,
         }
 
     # ------------------------------------------------------------------ #

@@ -5,12 +5,28 @@ class Settings(BaseSettings):
     # LLM Configuration
     LLM_PROVIDER: str = "ollama"  # ollama or llama_cpp
     LLM_MODEL: str = "llama3.1:latest"
+    # True  → local Ollama server (LLM_OLLAMA_BASE_URL)
+    # False → remote OpenAI-compatible server (LLM_REMOTE_* below)
+    LLM_USE_LOCAL: bool = False
     LLM_TEMPERATURE: float = 0.0
     # Upper bound on generated answers (tokens). Kept low so responses stay
     # concise and generation finishes quickly on CPU.
     LLM_MAX_TOKENS: int = 512
     LLM_NUM_CTX: int = 8192        # Ollama context window (tokens)
     LLM_OLLAMA_BASE_URL: str = "http://localhost:11434"
+    # Repetition control — guards against degenerate loops (llama models under
+    # greedy decoding sometimes repeat the same phrase endlessly).
+    # Local Ollama: repeat_penalty (1.0 = off) and repeat_last_n.
+    # Remote endpoint: frequency_penalty = repeat_penalty - 1.
+    LLM_REPEAT_PENALTY: float = 1.2
+    LLM_REPEAT_LAST_N: int = 256   # local Ollama only
+
+    # Remote OpenAI-compatible LLM (used when LLM_USE_LOCAL is False).
+    # BASE_URL is the OpenAI-compatible root; "/chat/completions" is appended.
+    LLM_REMOTE_BASE_URL: str = "http://dyres.pmf.kg.ac.rs:11500/v1"
+    LLM_REMOTE_MODEL: str = "llama3.1:8b"
+    LLM_REMOTE_API_KEY: str = ""
+    LLM_REMOTE_TIMEOUT: float = 300.0  # read timeout (seconds)
     
     # Embeddings
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"

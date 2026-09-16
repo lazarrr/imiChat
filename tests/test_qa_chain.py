@@ -128,16 +128,16 @@ def test_context_tags_match_footer_numbers():
     ]
 
 
-def test_filter_citations_strips_unknown_numbers():
+def test_filter_citations_removes_all_markers_and_reports_valid_citations():
     cleaned, cited = _filter_citations(
         "Predmet nosi 6 ESPB [Izvor 1], a vežbe su obavezne [Izvor 7]. "
         "Takođe [Izvor 1, 2].",
         valid_numbers={1, 2},
     )
 
-    assert "[Izvor 7]" not in cleaned
-    assert "[Izvor 1]" in cleaned
-    assert "[Izvor 1, 2]" in cleaned
+    assert "[Izvor" not in cleaned
+    assert "[izvor" not in cleaned.lower()
+    assert "Predmet nosi 6 ESPB, a vežbe su obavezne." in cleaned
     assert cited == {1, 2}
 
 
@@ -147,14 +147,38 @@ def test_filter_citations_removes_marker_with_no_valid_number():
     assert cited == set()
 
 
-def test_stream_filter_withholds_partial_marker_and_strips_invalid():
+def test_stream_filter_strips_markers_and_records_cited_numbers():
     filt = _CitationStreamFilter({1, 2})
 
-    assert filt.feed("Odgovor je [Iz") == "Odgovor je "
+    assert filt.feed("Odgovor je [Iz") == "Odgovor je"
     assert filt.feed("vor 9]") == ""
-    assert filt.feed(" i \n[Izv") == " i \n"
-    assert filt.feed("or 2]") == "[Izvor 2]"
+    assert filt.feed(" i [Izv") == " i"
+    assert filt.feed("or 2]") == ""
+    assert filt.feed(" tekst.") == " tekst."
     assert filt.finish() == ""
+    assert filt.cited == {2}
+
+
+def test_stream_filter_drops_space_left_by_removed_marker():
+    filt = _CitationStreamFilter({2})
+
+    assert filt.feed("nosi 6 ESPB ") == "nosi 6 ESPB"
+    assert filt.feed("[Izvor 2]") == ""
+    assert filt.feed(".") == "."
+    assert filt.cited == {2}
+
+
+def test_stream_filter_keeps_citations_out_of_the_text():
+    filt = _CitationStreamFilter({1})
+
+    emitted = (
+        filt.feed("Prva činjenica [Izvor 1]. ")
+        + filt.feed("Druga činjenica [Izvor 1].")
+        + filt.finish()
+    )
+
+    assert emitted == "Prva činjenica. Druga činjenica."
+    assert filt.cited == {1}
 
 
 def test_stream_filter_leaves_markdown_links_alone():
@@ -347,7 +371,7 @@ def test_dedupe_chunks_removes_repeated_text():
     assert [c.metadata["source"] for c in unique] == ["a.pdf", "b.pdf"]
 
 
-def test_stream_strips_invalid_citations_and_emits_structured_sources():
+def test_stream_strips_citations_and_emits_only_cited_sources():
     chunks = [
         _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf"),
         _chunk("Druga činjenica.", "b.pdf", page=2, type="pdf"),
@@ -361,12 +385,76 @@ def test_stream_strips_invalid_citations_and_emits_structured_sources():
     answer = "".join(e.text for e in events if isinstance(e, TokenChunk))
     sources_events = [e for e in events if isinstance(e, SourcesChunk)]
 
-    assert "[Izvor 7]" not in answer
-    assert "[Izvor 2]" in answer
+    assert "[Izvor" not in answer
+    assert "Prva činjenica. Druga činjenica." in answer
     assert len(sources_events) == 1
     numbers = [row["number"] for row in sources_events[0].sources]
     assert numbers == [2]
     assert sources_events[0].sources[0]["filename"] == "b.pdf"
+
+
+def test_query_strips_citations_and_returns_only_cited_sources():
+    chunks = [
+        _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf"),
+        _chunk("Druga činjenica.", "b.pdf", page=2, type="pdf"),
+    ]
+    system = _system(
+        ["Prva činjenica [Izvor 1]. Nepostojeći izvor [Izvor 9]."], chunks
+    )
+
+    response = system.query("pitanje")
+
+    assert "[Izvor" not in response["answer"]
+    assert response["answer"] == "Prva činjenica. Nepostojeći izvor."
+    assert response["sources"] == ["[1] a.pdf — strana 1"]
+    numbers = [row["number"] for row in response["sources_structured"]]
+    assert numbers == [1]
+
+
+def test_stream_uncited_answer_attributes_only_relevant_sources():
+    chunks = [
+        _chunk("Prva činjenica o informatici.", "a.pdf", page=1, type="pdf"),
+        _chunk("Matematika i analiza.", "matematika.pdf", page=2, type="pdf"),
+    ]
+    system = _system(
+        ["Prva činjenica o informatici bez oznake izvora."], chunks
+    )
+
+    events = _collect(system, "pitanje o informatici")
+    sources_events = [e for e in events if isinstance(e, SourcesChunk)]
+
+    assert len(sources_events) == 1
+    numbers = [row["number"] for row in sources_events[0].sources]
+    assert numbers == [1]
+    assert sources_events[0].sources[0]["filename"] == "a.pdf"
+
+
+def test_stream_uncited_answer_without_matching_chunks_has_no_sources():
+    chunks = [_chunk("Matematika i analiza.", "matematika.pdf", page=2, type="pdf")]
+    system = _system(["Potpuno nepovezana informacija o vremenu."], chunks)
+
+    events = _collect(system, "pitanje")
+    sources_events = [e for e in events if isinstance(e, SourcesChunk)]
+
+    assert sources_events == [SourcesChunk([])]
+
+
+def test_stream_with_stray_refusal_keeps_cited_sources():
+    chunks = [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
+    answer_text = (
+        "Prva činjenica je tačna i potkrepljena kontekstom [Izvor 1]. "
+        "Na osnovu konteksta, nemam informaciju o tome u dostupnim izvorima."
+    )
+    system = _system([answer_text], chunks)
+
+    events = _collect(system, "pitanje")
+    answer = "".join(e.text for e in events if isinstance(e, TokenChunk))
+    sources_events = [e for e in events if isinstance(e, SourcesChunk)]
+
+    assert "[Izvor" not in answer
+    assert len(sources_events) == 1
+    numbers = [row["number"] for row in sources_events[0].sources]
+    assert numbers == [1]
 
 
 def test_stream_refusal_suppresses_sources():

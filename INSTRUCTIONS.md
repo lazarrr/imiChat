@@ -10,7 +10,8 @@ university, split into two projects that share a single ChromaDB vector store:
 | `university-scraper` | Crawls the university website, extracts text from HTML/PDF/DOCX, chunks, embeds, and upserts into ChromaDB. |
 | `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Llama 3.1 8B (Ollama). |
 
-Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
+Answers are in **Serbian (Latin script)** with no citation markers in the
+text; the sources the model used travel in a structured `sources` payload.
 
 ---
 
@@ -19,7 +20,7 @@ Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 | Component | Required |
 |---|---|
 | **Conda** (Miniconda or Anaconda) | Environment management |
-| **Ollama** | Local LLM inference (`brew install ollama` on macOS) |
+| **Ollama** | Local LLM inference (`brew install ollama` on macOS) — only if `LLM_USE_LOCAL=True` |
 | **Python** ≥ 3.10 | Language runtime |
 | **Git** | Clone / version control (optional) |
 
@@ -46,7 +47,10 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Ollama setup
+## 2. Ollama setup (only when `LLM_USE_LOCAL=True`)
+
+The default backend is the remote OpenAI-compatible server, so this section
+is only needed if you switch to local inference.
 
 ```bash
 # Start the Ollama server (keep this running in a separate terminal)
@@ -57,7 +61,10 @@ ollama pull llama3.1:latest
 ```
 
 Ollama runs at `http://localhost:11434` by default.  The chatbot
-connects to it automatically — no extra configuration needed.
+connects to it automatically when `LLM_USE_LOCAL=True` — no extra
+configuration needed.  With the default `LLM_USE_LOCAL=False` the
+chatbot instead calls the remote OpenAI-compatible server configured
+via `LLM_REMOTE_*`.
 
 The chatbot also downloads `intfloat/multilingual-e5-large` for
 embeddings on first run (≈ 2.2 GB, one-time download).
@@ -81,7 +88,14 @@ via environment variables or a `.env` file.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_MODEL` | `llama3.1:latest` | Must match `ollama list` |
+| `LLM_USE_LOCAL` | `False` | `True` = local Ollama, `False` = remote API |
+| `LLM_MODEL` | `llama3.1:latest` | Local model; must match `ollama list` |
+| `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | OpenAI-compatible root |
+| `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
+| `LLM_REMOTE_API_KEY` | — | `Authorization: Bearer <key>` (see `.env.example`) |
+| `LLM_REMOTE_TIMEOUT` | `300` | Read timeout in seconds |
+| `LLM_REPEAT_PENALTY` | `1.2` | Repetition penalty; raise if answers loop (`1.0` = off) |
+| `LLM_REPEAT_LAST_N` | `256` | Repetition window in tokens (local Ollama only) |
 | `LLM_TEMPERATURE` | `0.0` | 0 = deterministic |
 | `LLM_MAX_TOKENS` | `2048` | Max response length |
 | `LLM_NUM_CTX` | `8192` | Context window (tokens) |
@@ -191,10 +205,14 @@ data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"u
 data: {"done":true}
 ```
 
-Source numbers come from a single per-query citation registry shared by the
-inline `[Izvor N]` tags and the `sources` event, so they can never renumber.
-On a refusal the `sources` list is empty; the server no longer appends a
-textual `--- Izvori:` block to the stream.
+Source numbers come from a single per-query citation registry: the LLM tags
+facts with `[Izvor N]`, those markers are stripped from the streamed answer,
+and only the numbers that are valid and actually cited are sent in the
+`sources` event.  When the model answers from the context without any
+markers, the answer is attributed back to the chunks it visibly draws from
+(rare-word overlap), so references still appear without listing unrelated
+documents.  On a refusal the `sources` list is empty; the server never
+appends a textual `--- Izvori:` block to the stream.
 
 ### Multi-turn conversation (with session)
 
@@ -228,10 +246,11 @@ curl -X POST http://localhost:8000/chat/stream \
    Reciprocal Rank Fusion. If that returns nothing, the original question
    is retried verbatim (no other fallbacks).
 4. Sends the full message list (system prompt + history + new
-   context-augmented question) to Ollama `/api/chat`.
-5. Streams the answer token-by-token, validating `[Izvor N]` markers as
-   they arrive (invalid numbers are never emitted) and emits a structured
-   `sources` event; refusals carry no sources.
+   context-augmented question) to the configured LLM backend (local
+   Ollama `/api/chat` or remote `/v1/chat/completions`).
+5. Streams the answer token-by-token with `[Izvor N]` markers removed
+   (records them internally) and emits a structured `sources` event with
+   only the sources actually cited; refusals carry no sources.
 6. Saves both the original question and answer to the session history.
 
 Sessions expire after **1 hour** of inactivity.
@@ -261,9 +280,11 @@ master/
 │   ├── config/settings.py       # Chatbot config
 │   ├── run.py                   # CLI entry point
 │   ├── src/
-│   │   ├── api/main.py          # FastAPI server + session management
+│   │   ├── api/                 # FastAPI app: main.py assembles the app;
+│   │   │                        # schemas.py, sessions.py, dependencies.py,
+│   │   │                        # middleware.py, routes/{chat,health}.py
 │   │   ├── core/
-│   │   │   ├── llm_manager.py   # Ollama wrappers (/api/chat & /api/generate)
+│   │   │   ├── llm_manager.py   # Local Ollama / remote OpenAI-compatible LLM
 │   │   │   ├── embeddings.py    # Embedding utilities
 │   │   │   └── vector_store.py  # ChromaDB reader (E5 prefixes)
 │   │   ├── chains/
@@ -305,9 +326,12 @@ Three fixes were applied to enable proper multi-turn conversations:
 Every retrieved chunk carries metadata (`source`, `filename`, `type`, `page`, `url`).
 A single `CitationRegistry` deduplicates `(source, page)` pairs and assigns
 each one a stable `[Izvor N]` number. The LLM sees chunks tagged as
-`[Izvor N — filename, strana M]` and the API emits the very same numbering
-in the structured `sources` SSE event. Citations whose number is not in the
-registry are stripped, and refusals suppress sources entirely.
+`[Izvor N — filename, strana M]`; the markers are stripped from the answer
+text while the cited numbers are recorded, and the API emits the very same
+numbering in the structured `sources` SSE event. Only sources the model
+actually cited are emitted; uncited grounded answers are attributed back to
+the chunks they share rare words with. Invalid numbers are dropped and
+refusals suppress sources entirely.
 
 ### Retrieval
 

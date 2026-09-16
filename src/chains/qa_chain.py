@@ -14,10 +14,12 @@ Citations
 A single :class:`CitationRegistry` assigns ``[Izvor N]`` numbers to
 deduplicated ``(source, page)`` pairs.  The very same registry is used to
 tag the context chunks *and* to render the source list, so a citation can
-never renumber between the two.  After streaming, invalid citations
-(numbers that do not exist in the registry) are removed, refusals suppress
-the source list entirely, and the structured source records are emitted as
-a dedicated event.
+never renumber between the two.  After streaming, ``[Izvor N]`` markers
+are stripped from the answer text (the client renders citations from the
+structured ``sources`` event).  Only sources the model actually cited are
+emitted; when a grounded answer carries no markers, it is attributed back
+to the chunks it visibly draws from.  Refusals suppress the source list
+entirely.
 
 Multi-turn conversation support
 -------------------------------
@@ -42,6 +44,7 @@ Multi-turn conversation support
 from __future__ import annotations
 
 import logging
+import math
 import re
 import unicodedata
 from collections.abc import AsyncGenerator
@@ -73,6 +76,81 @@ def _normalize_for_match(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# ── answer → source attribution (fallback for uncited answers) ──────── #
+# The model is asked to tag facts with [Izvor N], but smaller local models
+# sometimes answer from the context without any marker.  In that case the
+# answer is matched back to the chunks it visibly draws from, so the client
+# still shows the relevant sources instead of all retrieved ones.
+_ATTRIBUTION_MIN_WORD_LEN = 5
+# A chunk must score at least this fraction of the best-matching chunk.
+_ATTRIBUTION_RELATIVE_THRESHOLD = 0.5
+_ATTRIBUTION_MAX_SOURCES = 3
+
+
+def _content_terms(text: str) -> set[str]:
+    """Normalized words long enough to carry topical meaning."""
+    words = re.findall(r"[a-z0-9]+", _normalize_for_match(text))
+    return {word for word in words if len(word) >= _ATTRIBUTION_MIN_WORD_LEN}
+
+
+def _attribute_chunks(
+    answer: str, chunks: list[RetrievedChunk]
+) -> list[RetrievedChunk]:
+    """
+    Deterministically match an uncited answer back to the context chunks.
+
+    Each chunk is scored by the words it shares with the answer, weighted
+    by inverse document frequency across the retrieved chunks.  IDF
+    suppresses generic corpus vocabulary ("master", "studenti"), so a
+    chunk only wins on the terms that make the answer specific.  Chunks
+    well below the best match are dropped, which keeps unrelated documents
+    out of the source list.
+
+    Returns the selected chunks (at most ``_ATTRIBUTION_MAX_SOURCES``, one
+    per source page).
+    """
+    answer_terms = _content_terms(answer)
+    if not answer_terms or not chunks:
+        return []
+
+    chunk_terms = [_content_terms(chunk.document) for chunk in chunks]
+    document_frequency: dict[str, int] = {}
+    for terms in chunk_terms:
+        for word in terms & answer_terms:
+            document_frequency[word] = document_frequency.get(word, 0) + 1
+
+    total = len(chunks)
+    scored: list[tuple[float, RetrievedChunk]] = []
+    for chunk, terms in zip(chunks, chunk_terms):
+        shared = terms & answer_terms
+        if not shared:
+            continue
+        score = sum(
+            math.log(1.0 + total / document_frequency[word])
+            for word in shared
+        )
+        scored.append((score, chunk))
+
+    if not scored:
+        return []
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best = scored[0][0]
+    selected: list[RetrievedChunk] = []
+    seen: set[tuple] = set()
+    for score, chunk in scored:
+        if score < best * _ATTRIBUTION_RELATIVE_THRESHOLD:
+            break
+        key = (chunk.metadata.get("source"), chunk.metadata.get("page"))
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(chunk)
+        if len(selected) >= _ATTRIBUTION_MAX_SOURCES:
+            break
+    return selected
+
+
 _LEGACY_REFUSAL_MARKERS = (
     "nisam pronasao relevantne informacije",
     "nisam pronašao relevantne informacije",
@@ -100,36 +178,49 @@ _STRAY_REFUSAL_RE = re.compile(
 )
 
 
-def _strip_stray_refusal_sentence(answer: str) -> str:
-    """Drop a final "nemam informaciju..." sentence when a real, cited
-    answer precedes it.  A pure refusal is returned unchanged."""
+def _strip_stray_refusal_sentence(answer: str, was_grounded: bool = False) -> str:
+    """Drop a final "nemam informaciju..." sentence when a real, grounded
+    answer precedes it.  A pure refusal is returned unchanged.
+
+    ``was_grounded`` is set by callers that already know the model used at
+    least one valid source this turn; it compensates for the citation
+    markers having been stripped from the answer text.
+    """
     match = _STRAY_REFUSAL_RE.search(answer)
     if not match:
         return answer
     candidate = answer[: match.start()].strip()
-    if len(candidate) >= 80 and _CITATION_REGEX.search(candidate):
+    if was_grounded or (
+        len(candidate) >= 80 and _CITATION_REGEX.search(candidate)
+    ):
         return candidate
     return answer
 
 
-def _is_refusal(answer: str) -> bool:
+def _is_refusal(answer: str, was_grounded: bool = False) -> bool:
     """True when the model refused to answer from the given context.
 
     Only an answer that *starts* with the fixed refusal (or a short variant
     of it) counts — a long grounded answer ending with a stray refusal
     sentence keeps its sources.
     """
-    # Ignore a stray refusal sentence appended to an otherwise grounded
-    # answer ("... [Izvor 2]. Na osnovu konteksta, nemam informaciju...").
-    normalized = _normalize_for_match(_strip_stray_refusal_sentence(answer))
-    if normalized.startswith("na osnovu konteksta"):
-        # "Na osnovu konteksta, nemam informaciju..." is a refusal, while
-        # "Na osnovu konteksta, predmet nosi..." is a grounded answer.
-        return any(marker in normalized[:100] for marker in _REFUSAL_MARKERS)
+    normalized = _normalize_for_match(answer)
     if any(normalized.startswith(prefix) for prefix in _REFUSAL_PREFIXES):
         return True
-    return len(normalized) <= 120 and any(
-        marker in normalized for marker in _REFUSAL_MARKERS
+    if normalized.startswith("na osnovu konteksta") and any(
+        marker in normalized[:100] for marker in _REFUSAL_MARKERS
+    ):
+        # "Na osnovu konteksta, nemam informaciju..." is a refusal, while
+        # "Na osnovu konteksta, predmet nosi..." is a grounded answer.
+        return True
+
+    # Ignore a stray refusal sentence appended to an otherwise grounded
+    # answer ("... [Izvor 2]. Na osnovu konteksta, nemam informaciju...").
+    stripped = _normalize_for_match(
+        _strip_stray_refusal_sentence(answer, was_grounded)
+    )
+    return len(stripped) <= 120 and any(
+        marker in stripped for marker in _REFUSAL_MARKERS
     )
 
 
@@ -151,20 +242,18 @@ def _clean_spacing(text: str) -> str:
 
 def _filter_citations(text: str, valid_numbers: set[int]) -> tuple[str, set[int]]:
     """
-    Keep only citations whose number exists in ``valid_numbers``.
+    Remove every ``[Izvor N]`` marker from ``text`` and return the numbers
+    the model cited that actually exist in ``valid_numbers``.
 
-    Returns the cleaned text and the set of citation numbers the model
-    actually used.
+    Markers are stripped because citations are rendered by the client from
+    the structured ``sources`` payload, not from the answer text.
     """
     cited: set[int] = set()
 
     def replace(match: re.Match) -> str:
         numbers = [int(n) for n in _NUMBERS_REGEX.findall(match.group(1))]
-        kept = [n for n in numbers if n in valid_numbers]
-        cited.update(kept)
-        if not kept:
-            return ""
-        return "[Izvor " + ", ".join(str(n) for n in kept) + "]"
+        cited.update(n for n in numbers if n in valid_numbers)
+        return ""
 
     cleaned = _CITATION_REGEX.sub(replace, text)
     return _clean_spacing(cleaned), cited
@@ -172,13 +261,18 @@ def _filter_citations(text: str, valid_numbers: set[int]) -> tuple[str, set[int]
 
 class _CitationStreamFilter:
     """
-    Validates ``[Izvor N]`` markers while tokens stream.
+    Removes ``[Izvor N]`` markers while tokens stream and records which
+    citation numbers the model used.
 
-    Partial markers are held back until their closing bracket arrives, so
-    the client never renders an invalid citation — the "post-stream pass"
-    is simply ``finish()`` flushing whatever is left in the buffer.
-    A marker that is obviously not a citation (e.g. a Markdown link) is
-    released immediately.
+    The answer text sent to the client carries no citation markers — the
+    client renders the ``sources`` payload instead — but the numbers are
+    still needed to decide which sources to emit.  Partial markers are
+    held back until their closing bracket arrives, so a marker split
+    across tokens is never leaked.  Trailing whitespace is held back just
+    long enough to be dropped together with a marker that follows it,
+    which avoids leftover spaces before punctuation.  A marker that is
+    obviously not a citation (e.g. a Markdown link) is released
+    immediately.
     """
 
     _PARTIAL_CITATION_RE = re.compile(
@@ -190,6 +284,8 @@ class _CitationStreamFilter:
     def __init__(self, valid_numbers: set[int]) -> None:
         self._valid = set(valid_numbers)
         self._pending = ""
+        self._whitespace = ""
+        self.cited: set[int] = set()
 
     def feed(self, token: str) -> str:
         self._pending += token
@@ -205,10 +301,8 @@ class _CitationStreamFilter:
         if not match:
             return marker
         numbers = [int(n) for n in _NUMBERS_REGEX.findall(match.group(1))]
-        kept = [n for n in numbers if n in self._valid]
-        if not kept:
-            return ""
-        return "[Izvor " + ", ".join(str(n) for n in kept) + "]"
+        self.cited.update(n for n in numbers if n in self._valid)
+        return ""
 
     def _drain(self, final: bool) -> str:
         out: list[str] = []
@@ -241,13 +335,37 @@ class _CitationStreamFilter:
             out.append(rest[0])
             self._pending = rest[1:]
 
-        return "".join(out)
+        return self._release("".join(out), final)
+
+    def _release(self, text: str, final: bool) -> str:
+        """Tidy the whitespace around dropped citations.
+
+        A space that preceded a removed marker must not survive in front of
+        the punctuation that follows it ("ESPB [Izvor 2]." → "ESPB.").
+        Trailing whitespace is held back so the same holds when the marker
+        and the punctuation arrive in different tokens.
+        """
+        combined = self._whitespace + text
+        self._whitespace = ""
+        combined = re.sub(r"[ \t]+([,.;:!?])", r"\1", combined)
+        if final:
+            return combined
+
+        # Avoid a double space when the previous token ended with one that
+        # was held back while a marker resolved.
+        combined = re.sub(r"^[ \t]{2,}", " ", combined)
+        stripped = combined.rstrip()
+        if not stripped:
+            self._whitespace = combined
+            return ""
+        self._whitespace = combined[len(stripped) :]
+        return stripped
 
 
 # ── streaming events ────────────────────────────────────────────────── #
 @dataclass(frozen=True)
 class TokenChunk:
-    """A piece of the answer, already citation-validated."""
+    """A piece of the answer, with citation markers already stripped."""
 
     text: str
 
@@ -870,7 +988,9 @@ class UniversityQASystem:
             # njima?") has no topic of its own.  The previous question is
             # the deterministic, always-identical retrieval query — it is
             # exactly what produced the context the user is asking about.
-            previous = self._previous_user_question(question, history)
+            # //////////////////
+            previous = self._previous_user_question(question, history) ### maybe we need to fetch the previous answer 
+            #. ///////////////////
             if previous:
                 return _QueryPlan(previous, "previous-question")
             return _QueryPlan(None, "unresolvable")
@@ -1083,7 +1203,7 @@ class UniversityQASystem:
         if not chunks:
             return registry, [], []
 
-        more_info = bool(history) and self._is_more_info_followup(question)
+        more_info = bool(history) and self._is_more_info_followup(question) # why we have thsi condition here? if we have a logic in retrieve section about unclear qeuestions!
         context = self._build_context(chunks, registry)
         trimmed = self._trim_history(history, context, question, more_info)
 
@@ -1135,8 +1255,10 @@ class UniversityQASystem:
             return response
 
         answer = self.llm_manager.chat(messages)
-        answer = self._finalize_answer(answer, registry)
-        response = self._response(question, answer, registry)
+        answer, cited = self._finalize_answer(answer, registry)
+        if not cited and not _is_refusal(answer):
+            cited = self._attribute_cited(answer, chunks, registry)
+        response = self._response(question, answer, registry, cited)
         response["chunk_ids"] = [c.id for c in chunks]
         return response
 
@@ -1148,14 +1270,38 @@ class UniversityQASystem:
             "sources_structured": [],
         }
 
-    def _finalize_answer(self, answer: str, registry: CitationRegistry) -> str:
-        """Post-stream validation for the non-streaming path."""
-        answer, _cited = _filter_citations(answer, registry.valid_numbers)
-        answer = _strip_stray_refusal_sentence(answer)
-        return answer.strip()
+    @staticmethod
+    def _attribute_cited(
+        answer: str,
+        chunks: list[RetrievedChunk],
+        registry: CitationRegistry,
+    ) -> set[int]:
+        """Map an uncited answer back to the chunks it was grounded in."""
+        return {
+            registry.number_for(chunk.metadata)
+            for chunk in _attribute_chunks(answer, chunks)
+        }
 
-    def _response(self, question: str, answer: str, registry: CitationRegistry) -> dict:
-        if _is_refusal(answer):
+    def _finalize_answer(
+        self, answer: str, registry: CitationRegistry
+    ) -> tuple[str, set[int]]:
+        """Post-stream validation for the non-streaming path.
+
+        Returns the citation-free answer text and the set of valid citation
+        numbers the model used.
+        """
+        answer, cited = _filter_citations(answer, registry.valid_numbers)
+        answer = _strip_stray_refusal_sentence(answer, was_grounded=bool(cited))
+        return answer.strip(), cited
+
+    def _response(
+        self,
+        question: str,
+        answer: str,
+        registry: CitationRegistry,
+        cited: set[int],
+    ) -> dict:
+        if _is_refusal(answer, was_grounded=bool(cited)):
             return {
                 "question": question,
                 "answer": answer,
@@ -1165,8 +1311,8 @@ class UniversityQASystem:
         return {
             "question": question,
             "answer": answer,
-            "sources": registry.footer(),
-            "sources_structured": registry.structured(),
+            "sources": registry.footer(cited),
+            "sources_structured": registry.structured(cited),
         }
 
     # ------------------------------------------------------------------ #
@@ -1183,8 +1329,9 @@ class UniversityQASystem:
         """
         Stream response tokens, then emit the structured source records.
 
-        Tokens are validated as they stream (partial ``[Izvor N]`` markers
-        are buffered), so invalid citations are never rendered.  On
+        ``[Izvor N]`` markers are stripped from the streamed text (partial
+        markers are buffered) while the cited numbers are recorded, so the
+        client renders citations only from the ``sources`` payload.  On
         completion, a refusal suppresses the source list entirely.
 
         A ``RetrievedIdsChunk`` with the ids of the chunks used this turn is
@@ -1220,13 +1367,16 @@ class UniversityQASystem:
 
         # ── Post-stream pass ──────────────────────────────────────────── #
         answer = _clean_spacing("".join(emitted))
+        cited = set(stream_filter.cited)
 
-        if _is_refusal(answer):
+        if _is_refusal(answer, was_grounded=bool(cited)):
             # Refusals carry no sources — the API must not render Izvori.
             yield SourcesChunk([])
         else:
-            _, cited = _filter_citations(answer, registry.valid_numbers)
-            # Emit the sources the model actually cited; if it cited none,
-            # fall back to every retrieved source so the user can still
-            # inspect what the answer was grounded in.
-            yield SourcesChunk(registry.structured(cited or None))
+            # Emit the sources the model cited, or — when it answered
+            # without markers — the chunks the answer visibly draws from.
+            # Never every retrieved chunk: that would surface irrelevant
+            # documents and pile up as follow-ups retrieve deeper.
+            if not cited:
+                cited = self._attribute_cited(answer, chunks, registry)
+            yield SourcesChunk(registry.structured(cited))

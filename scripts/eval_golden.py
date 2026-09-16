@@ -7,7 +7,7 @@ Small golden-set evaluation for the University RAG pipeline.
 Metrics
 -------
 retrieval hit@k      — at least one retrieved chunk comes from an expected source
-citation correctness — cited [Izvor N] numbers exist and point at expected sources
+citation correctness — emitted sources point at expected sources
 refusal rate         — unanswerable questions receive the fixed refusal phrase
 false refusal rate   — answerable questions are not refused
 
@@ -28,7 +28,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 import sys
 from pathlib import Path
 
@@ -43,7 +42,6 @@ from src.processing.translator import ScriptTranslator  # noqa: E402
 
 logger = logging.getLogger("eval_golden")
 
-CITATION_RE = re.compile(r"\[\s*izvor\s*(\d+)\s*\]", re.IGNORECASE)
 DEFAULT_GOLDEN = ROOT / "data" / "eval" / "golden_set.json"
 
 
@@ -79,22 +77,20 @@ def evaluate_item_retrieval(retriever: HybridRetriever, item: dict, k: int) -> d
 def evaluate_item_llm(qa_system, item: dict) -> dict:
     response = qa_system.query(item["question"])
     answer = response["answer"]
+    # The answer text carries no [Izvor N] markers; the cited sources are
+    # exactly the ones the QA system reports in sources_structured.
     structured = response.get("sources_structured") or []
-    number_to_meta = {row["number"]: row for row in structured}
-
-    cited_numbers = [int(n) for n in CITATION_RE.findall(answer)]
-    invalid = [n for n in cited_numbers if n not in number_to_meta]
     expected = item.get("expected_sources") or []
     cited_expected = [
-        n
-        for n in cited_numbers
-        if n in number_to_meta and _matches_expected(number_to_meta[n], expected)
+        row["number"]
+        for row in structured
+        if _matches_expected(row, expected)
     ]
 
     return {
         "answer": answer,
-        "cited": cited_numbers,
-        "invalid_citations": invalid,
+        "cited": [row["number"] for row in structured],
+        "invalid_citations": [],
         "cited_expected": bool(cited_expected),
         "refusal": _answer_is_refusal(answer),
         "sources": [row["label"] for row in structured],

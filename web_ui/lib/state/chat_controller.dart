@@ -200,15 +200,16 @@ class ChatController extends ChangeNotifier {
     if (assistant.content.isEmpty) {
       assistant.content = error ?? 'Server je vratio prazan odgovor.';
     }
-    // Fallback: an older backend (or a persisted message) may deliver the
-    // sources as a trailing `--- Izvori:` block instead of a sources event.
-    if (assistant.sources.isEmpty) {
-      final parsed = splitSources(assistant.content);
-      if (parsed.sources.isNotEmpty) {
-        assistant.sources = parsed.sources;
-        assistant.content = parsed.text;
-      }
+    // An older backend (or a persisted message) may deliver the sources as
+    // a trailing `--- Izvori:` block and leave `[Izvor N]` markers in the
+    // answer text.  [splitSources] handles both; it is applied even when
+    // the structured `sources` event was received so the stored text stays
+    // citation-free.
+    final parsed = splitSources(assistant.content);
+    if (assistant.sources.isEmpty && parsed.sources.isNotEmpty) {
+      assistant.sources = parsed.sources;
     }
+    assistant.content = parsed.text;
     convo.touch();
     _persist();
     notifyListeners();
@@ -225,6 +226,7 @@ class ChatController extends ChangeNotifier {
       if (assistant.content.isEmpty) {
         assistant.content = 'Odgovor je prekinut.';
       }
+      assistant.content = stripCitationMarkers(assistant.content);
       _persist();
     }
     notifyListeners();

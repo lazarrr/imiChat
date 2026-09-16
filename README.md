@@ -2,10 +2,13 @@
 
 A Retrieval-Augmented Generation (RAG) chatbot for the IMI PMF Kragujevac
 university. It reads a shared ChromaDB vector store, retrieves the most
-relevant chunks for a question, and answers using **Llama 3.1 8B** (served
-locally by [Ollama](https://ollama.com)).
+relevant chunks for a question, and answers using **Llama 3.1 8B** — served
+either locally by [Ollama](https://ollama.com) or by a remote
+OpenAI-compatible server (set `LLM_USE_LOCAL=False`, the default).
 
-Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
+Answers are in **Serbian (Latin script)**.  The answer text carries no
+citation markers; the sources the model used are sent as a structured
+`sources` payload that the client renders.
 
 ## Features
 
@@ -36,7 +39,10 @@ conda activate uni
 pip install -r requirements.txt
 ```
 
-## 2. Start Ollama
+## 2. Start Ollama (only when `LLM_USE_LOCAL=True`)
+
+The default backend is the remote OpenAI-compatible server, so this step
+can be skipped unless you switch to local inference.
 
 Run in a separate terminal:
 
@@ -108,9 +114,13 @@ The response is Server-Sent Events (SSE), token by token:
 data: {"token":"Predmet"}
 data: {"token":" Uvod"}
 ...
-data: {"token":"\n\n---\nIzvori:\n[1] informatika_oas_2021.pdf — strana 12"}
+data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12"}]}
 data: {"done":true}
 ```
+
+Only sources the model actually cited are emitted; when a grounded answer
+carries no markers, it is attributed back to the chunks it draws from.  A
+refusal carries an empty `sources` list.
 
 ### Multi-turn conversation (with session)
 
@@ -136,7 +146,14 @@ environment variables or a `.env` file (see `.env.example`).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_MODEL` | `llama3.1:latest` | Must match `ollama list` |
+| `LLM_USE_LOCAL` | `False` | `True` = local Ollama, `False` = remote API |
+| `LLM_MODEL` | `llama3.1:latest` | Local model; must match `ollama list` |
+| `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | OpenAI-compatible root |
+| `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
+| `LLM_REMOTE_API_KEY` | — | `Authorization: Bearer <key>` (see `.env.example`) |
+| `LLM_REMOTE_TIMEOUT` | `300` | Read timeout in seconds |
+| `LLM_REPEAT_PENALTY` | `1.2` | Repetition penalty; raise if answers loop (`1.0` = off) |
+| `LLM_REPEAT_LAST_N` | `256` | Repetition window in tokens (local Ollama only) |
 | `LLM_TEMPERATURE` | `0.0` | 0 = deterministic |
 | `LLM_MAX_TOKENS` | `2048` | Max response length |
 | `LLM_NUM_CTX` | `8192` | Context window (tokens) |
@@ -158,9 +175,16 @@ environment variables or a `.env` file (see `.env.example`).
 ├── run.py                     # CLI entry point
 ├── src/
 │   ├── api/
-│   │   └── main.py            # FastAPI server + session management
+│   │   ├── main.py            # FastAPI app assembly + entry point
+│   │   ├── schemas.py         # Request/response models
+│   │   ├── sessions.py        # In-memory session store
+│   │   ├── dependencies.py    # Shared QA system instance
+│   │   ├── middleware.py      # CORS setup
+│   │   └── routes/
+│   │       ├── chat.py        # POST /chat/stream (SSE)
+│   │       └── health.py      # GET /health
 │   ├── core/
-│   │   ├── llm_manager.py     # Ollama wrappers (/api/chat & /api/generate)
+│   │   ├── llm_manager.py     # Local Ollama / remote OpenAI-compatible LLM
 │   │   ├── embeddings.py      # Embedding utilities
 │   │   └── vector_store.py    # ChromaDB reader (E5 prefixes)
 │   ├── chains/
@@ -183,8 +207,10 @@ environment variables or a `.env` file (see `.env.example`).
 2. **Retrieve** the top-K most similar chunks from ChromaDB
    (collection `university_knowledge`).
 3. **Build** a prompt with `[Izvor N — filename, strana N]` context.
-4. **Generate** the answer via Ollama `/api/chat`, streaming tokens.
-5. **Append** a deduplicated `--- Izvori:` citation block.
+4. **Generate** the answer via the configured LLM backend (local Ollama or
+   remote `/v1/chat/completions`), streaming tokens with the `[Izvor N]`
+   markers stripped.
+5. **Emit** the cited sources as a structured `sources` SSE event.
 
 > The E5 model requires explicit task prefixes — `passage: ` when indexing
 > and `query: ` when searching. Omitting them degrades retrieval quality.

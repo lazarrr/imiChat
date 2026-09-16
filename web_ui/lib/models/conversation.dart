@@ -54,6 +54,23 @@ class Conversation {
       );
 }
 
+final _citationMarkerRe =
+    RegExp(r'\[\s*izvor\b[^\]]*\]', caseSensitive: false);
+
+/// Removes any `[Izvor N]` markers that may still be present in an answer.
+///
+/// The backend strips them from the answer text and sends the citation
+/// numbers separately in the `sources` event; this is a safety net for
+/// persisted messages written by an older backend.
+String stripCitationMarkers(String text) {
+  var cleaned = text.replaceAll(_citationMarkerRe, '');
+  cleaned = cleaned.replaceAllMapped(
+    RegExp(r'[ \t]+([,.;:!?])'),
+    (match) => match.group(1)!,
+  );
+  return cleaned;
+}
+
 /// Splits an assistant answer into the main text and a list of sources.
 ///
 /// Primary source of truth is [ChatMessage.sources] (populated from the
@@ -63,9 +80,13 @@ class Conversation {
 ///
 ///     --- Izvori:
 ///     [1] informatika_oas_2021.pdf — strana 12
+///
+/// In every case the returned text is free of inline `[Izvor N]` markers.
 ({String text, List<ChatSource> sources}) splitSources(String content) {
   final idx = content.lastIndexOf('\n\n---\nIzvori:');
-  if (idx == -1) return (text: content, sources: const []);
+  if (idx == -1) {
+    return (text: stripCitationMarkers(content), sources: const []);
+  }
 
   final text = content.substring(0, idx).trim();
   final block = content.substring(idx + '\n\n---\n'.length).trim();
@@ -82,5 +103,5 @@ class Conversation {
       ));
     }
   }
-  return (text: text, sources: sources);
+  return (text: stripCitationMarkers(text), sources: sources);
 }
