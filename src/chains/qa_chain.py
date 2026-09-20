@@ -720,39 +720,33 @@ class UniversityQASystem:
     #  Conversation history helpers                                        #
     # ------------------------------------------------------------------ #
 
+    # The rewrite prompt only ever sees the model's most recent answer; it
+    # is truncated to this many chars to keep that prompt focused.
+    _REWRITE_ANSWER_CHAR_LIMIT = 1200
+
     @staticmethod
-    def _format_history_for_rewrite(
-        history: list[dict[str, str]],
-        include_last_answer: bool = False,
-    ) -> str:
+    def _format_last_answer_for_rewrite(history: list[dict[str, str]]) -> str:
         """
-        Convert the last 1–2 turns into a compact text block for the
-        query-rewrite prompt.
+        Return the model's most recent answer as a compact text block for
+        the query-rewrite prompt.
 
-        Assistant messages are truncated to 400 chars to keep the prompt
-        focused on the topic rather than the full answer text.
-
-        When ``include_last_answer`` is True (the latest question is
-        unclear and refers back to the previous answer), the most recent
-        assistant message is kept much longer (1200 chars) because it is
-        the reference point that must resolve the question.
+        Only the last assistant message is used: it names the entities a
+        referential follow-up ("šta možeš da mi kažeš o njima?") points to.
+        Previous turns are deliberately left out so the rewrite is built
+        from the answer rather than echoing the question that produced it.
         """
-        if not history:
-            return ""
-        # Use at most the last 4 messages (2 full turns)
-        recent = history[-4:]
-        lines: list[str] = []
-        for i, msg in enumerate(recent):
-            role = msg.get("role", "user")
-            label = "Korisnik" if role == "user" else "Asistent"
-            content = msg.get("content", "")
-            is_last = i == len(recent) - 1
-            if role == "assistant":
-                limit = 1200 if (include_last_answer and is_last) else 400
-                if len(content) > limit:
-                    content = content[:limit] + "..."
-            lines.append(f"{label}: {content}")
-        return "\n".join(lines)
+        for msg in reversed(history):
+            if msg.get("role") != "assistant":
+                continue
+            content = (msg.get("content") or "").strip()
+            if not content:
+                return ""
+            if len(content) > UniversityQASystem._REWRITE_ANSWER_CHAR_LIMIT:
+                content = (
+                    content[: UniversityQASystem._REWRITE_ANSWER_CHAR_LIMIT] + "..."
+                )
+            return content
+        return ""
 
     @staticmethod
     def _is_unclear_question(question: str) -> bool:
@@ -919,21 +913,20 @@ class UniversityQASystem:
     ) -> str | None:
         """
         A single, bounded LLM call that rewrites the question into a
-        standalone query.  Returns ``None`` when the call fails, times out,
-        echoes the input, has implausible length or drifts from the
-        conversation topic — the caller then uses the deterministic
+        standalone query.  The model only sees its own most recent answer
+        plus the latest question.  Returns ``None`` when the call fails,
+        times out, echoes the input, has implausible length or drifts from
+        the conversation topic — the caller then uses the deterministic
         fallback instead.
         """
         unclear = self._is_unclear_question(question)
-        history_text = self._format_history_for_rewrite(
-            history, include_last_answer=unclear
-        )
-        if not history_text.strip():
+        last_answer = self._format_last_answer_for_rewrite(history)
+        if not last_answer:
             return None
 
         try:
             rewritten = self.llm_manager.rewrite_query(
-                history_text,
+                last_answer,
                 question,
                 is_unclear=unclear,
                 timeout=self.rewrite_timeout,
@@ -946,7 +939,11 @@ class UniversityQASystem:
         if not rewritten or rewritten == question.strip():
             logger.info("Rewrite empty or unchanged — using deterministic fallback")
             return None
-        if len(rewritten) < len(question) * 0.3 or len(rewritten) > len(question) * 5:
+        # A referential follow-up is short by nature ("šta još?"), but the
+        # standalone rewrite has to spell out the topic, so the upper bound
+        # gets a floor for unclear questions.
+        max_chars = max(len(question) * 5, 200) if unclear else len(question) * 5
+        if len(rewritten) < len(question) * 0.3 or len(rewritten) > max_chars:
             logger.warning(
                 "Rewrite length implausible (%d → %d chars) — using fallback",
                 len(question),
@@ -968,12 +965,12 @@ class UniversityQASystem:
 
         1. Standalone (cheap heuristic)      → embed the question as-is.
         2. Ambiguous / context-dependent     → resolve from previous turns:
-           a. pure referential follow-up     → previous clear question,
-              deterministically (no LLM call);
-           b. no usable prior context        → unresolvable: skip retrieval
+           a. no usable prior context        → unresolvable: skip retrieval
               and generation, fixed refusal;
-           c. otherwise                      → one bounded LLM rewrite, with
-              a deterministic fallback on failure.
+           b. otherwise                      → one bounded LLM rewrite built
+              from the model's last answer only: referential words are
+              replaced with the entities it names, and a deterministic
+              fallback is used if the rewrite fails.
         3. Short/vague but topical           → verbatim without history,
               rewrite (as above) with history.
         """
@@ -981,28 +978,26 @@ class UniversityQASystem:
             return _QueryPlan(question, "standalone")
 
         unclear = self._is_unclear_question(question)
-        has_topic = self._has_topic_words(question)
-
-        if unclear and not has_topic:
-            # A purely referential follow-up ("šta možeš da mi kažeš o
-            # njima?") has no topic of its own.  The previous question is
-            # the deterministic, always-identical retrieval query — it is
-            # exactly what produced the context the user is asking about.
-            # //////////////////
-            previous = self._previous_user_question(question, history) ### maybe we need to fetch the previous answer 
-            #. ///////////////////
-            if previous:
-                return _QueryPlan(previous, "previous-question")
-            return _QueryPlan(None, "unresolvable")
 
         if unclear and not self._has_resolvable_context(question, history):
             return _QueryPlan(None, "unresolvable")
 
         if not unclear and not history:
-            # No referential markers and no history — nothing to resolve;
-            # the question still names its own topic.
+            # Clear, multi-word questions never reach this line — the
+            # _looks_standalone branch above already returns them as-is,
+            # with or without history.  Only short ("ESPB?") or
+            # continuation-prefixed ("A koliko ...") questions land here.
+            # Without history there is nothing to combine them with, so the
+            # original wording is the best available query.
             return _QueryPlan(question, "verbatim")
 
+        # Ambiguous question with usable context: one bounded LLM rewrite.
+        # A purely referential follow-up ("šta možeš da mi kažeš o njima?")
+        # has no topic of its own, so the rewrite prompt replaces "njima"
+        # with the entities named in the model's last answer.  When the
+        # rewrite fails, times out or drifts, _context_fallback_query falls
+        # back to the previous clear question deterministically (or to the
+        # question itself).
         rewritten = self._try_llm_rewrite(question, history)
         if rewritten:
             return _QueryPlan(rewritten, "rewritten")

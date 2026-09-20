@@ -329,20 +329,18 @@ class LLMManager:
     ) -> str:
         """
         Rewrite a follow-up question into a standalone question using the
-        last 1–2 turns of conversation history.
+        model's most recent answer.
 
         Uses a short /api/generate call with a small token budget so it's
         near-instant once the model is warm.
 
-        Both the previous *questions* and the previous *answers* are given
-        to the model: the answer usually names the entities a follow-up
-        ("what can you tell me about them?") refers to, while the previous
-        question anchors the topic (e.g. "OAS informatika").  The prompt
-        explicitly demands that the previous question's topic is preserved,
-        otherwise the rewrite drifts to a different subject.
+        Only the previous *answer* is given to the model (``history_text``):
+        it names the entities a referential follow-up ("what can you tell me
+        about them?") points to.  The prompt demands that the rewritten
+        question names its topic explicitly, otherwise it is not standalone.
 
         Rewrites are deterministic: temperature is 0, a fixed seed is set,
-        and the successful result is cached by (history, question, unclear),
+        and the successful result is cached by (context, question, unclear),
         so the same conversation state always yields the same query.
 
         ``timeout`` caps how long the caller waits; on timeout the original
@@ -362,9 +360,10 @@ class LLMManager:
                 "1. Zameni nejasne reci (npr. 'njima', 'to', 'tim') konkretnim "
                 "pojmovima iz prethodnog ODGOVORA asistenta (nazivi smerova, "
                 "modula, predmeta, programa).\n"
-                "2. Temu iz prethodnog PITANJA korisnika (npr. naziv programa "
-                "ili smera) obavezno ukljuci u prepisano pitanje — bez nje "
-                "pitanje nije samostalno.\n"
+                "2. Prepisano pitanje mora jasno da imenuje temu o kojoj se "
+                "govori (npr. naziv programa, smera, modula ili predmeta), "
+                "koristeci pojmove iz prethodnog ODGOVORA i najnovijeg "
+                "pitanja — bez toga pitanje nije samostalno.\n"
                 "3. Ako najnovije pitanje trazi DODATNE informacije o necemu "
                 "iz prethodnog odgovora, prepisi ga tako da jasno imenuje "
                 "temu o kojoj se traze dodatne informacije, ali NE dodaj "
@@ -376,8 +375,7 @@ class LLMManager:
             reference_rule = (
                 "Ako se najnovije pitanje odnosi na nesto iz prethodnog "
                 "ODGOVORA asistenta, razresi to pomocu tog odgovora i sacuvaj "
-                "temu najnovijeg pitanja. NE spajaj prethodno pitanje sa "
-                "najnovijim — prethodno pitanje sluzi samo kao kontekst.\n"
+                "temu najnovijeg pitanja.\n"
                 "Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
             )
 
@@ -385,7 +383,7 @@ class LLMManager:
             "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
             "ono postane potpuno samostalno — tako da neko ko ne vidi istoriju "
             "razgovora moze da razume na sta se pitanje odnosi.\n\n"
-            "Istorija razgovora (sadrzi i odgovore asistenta):\n"
+            "Prethodni odgovor asistenta:\n"
             f"{history_text}\n\n"
             "Najnovije pitanje: "
             f"{latest_question}\n\n"

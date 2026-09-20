@@ -282,11 +282,15 @@ def test_rewrite_failure_combines_when_followup_has_its_own_topic():
     )
 
 
-def test_pure_referential_followup_skips_llm_rewrite():
-    llm = _FakeLLM(
-        ["nebitno"],
-        rewrite=lambda *_: "Šta možeš da mi kažeš o smerovima?",
-    )
+def test_pure_referential_followup_is_rewritten_from_previous_answer():
+    captured = {}
+
+    def rewrite(history_text, question, is_unclear):
+        captured["history_text"] = history_text
+        captured["is_unclear"] = is_unclear
+        return "Šta možeš da mi kažeš o smerovima?"
+
+    llm = _FakeLLM(["nebitno"], rewrite=rewrite)
     system = _system_with(
         llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
     )
@@ -299,8 +303,11 @@ def test_pure_referential_followup_skips_llm_rewrite():
         "Šta možeš da mi kažeš o njima?", history
     )
 
-    assert standalone == "Koliko ima smerova na OAS informatici?"
-    assert llm.rewrite_calls == 0
+    assert standalone == "Šta možeš da mi kažeš o smerovima?"
+    assert llm.rewrite_calls == 1
+    assert captured["is_unclear"] is True
+    assert "Postoje dva smera." in captured["history_text"]
+    assert "Koliko ima smerova na OAS informatici?" not in captured["history_text"]
 
 
 def test_followup_chain_anchors_to_last_clear_question():
