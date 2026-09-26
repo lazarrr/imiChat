@@ -368,6 +368,97 @@ def test_rewrite_that_resolves_reference_and_keeps_topic_is_used():
     assert standalone == "Koji su preduslovi za predmet Uvod u programiranje?"
 
 
+def test_rewrite_that_swaps_the_named_topic_is_rejected():
+    llm = _FakeLLM(
+        ["nebitno"],
+        rewrite=lambda *_: "Koliko modula ima na matematici?",
+    )
+    system = _system_with(
+        llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
+    )
+    history = [
+        {"role": "user", "content": "Koliko ima modula na matematici?"},
+        {
+            "role": "assistant",
+            "content": "Matematika ima tri modula [Izvor 1].",
+        },
+    ]
+
+    standalone = system._standalone_question("A koliko ima na informatici?", history)
+
+    assert standalone == (
+        "Koliko ima modula na matematici? A koliko ima na informatici?"
+    )
+
+
+def test_rewrite_that_keeps_the_named_topic_and_fills_the_gap_is_used():
+    llm = _FakeLLM(
+        ["nebitno"],
+        rewrite=lambda *_: "Koliko modula ima na informatici?",
+    )
+    system = _system_with(
+        llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
+    )
+    history = [
+        {"role": "user", "content": "Koliko ima modula na matematici?"},
+        {
+            "role": "assistant",
+            "content": "Matematika ima tri modula [Izvor 1].",
+        },
+    ]
+
+    standalone = system._standalone_question("A koliko ima na informatici?", history)
+
+    assert standalone == "Koliko modula ima na informatici?"
+
+
+def test_subject_elided_followup_is_rewritten_from_previous_answer():
+    captured = {}
+
+    def rewrite(history_text, question, is_unclear):
+        captured["history_text"] = history_text
+        return "Od kada studentska služba radi sa studentima?"
+
+    llm = _FakeLLM(["nebitno"], rewrite=rewrite)
+    system = _system_with(
+        llm,
+        [_chunk("Studentska služba radi od 9 do 15.", "a.pdf", page=1, type="pdf")],
+    )
+    history = [
+        {"role": "user", "content": "Od kada radi studentska služba?"},
+        {
+            "role": "assistant",
+            "content": "Studentska služba radi od 9 do 15 [Izvor 1].",
+        },
+    ]
+
+    standalone = system._standalone_question("Od kad radi sa studentima?", history)
+
+    assert standalone == "Od kada studentska služba radi sa studentima?"
+    assert llm.rewrite_calls == 1
+    assert "Studentska služba radi od 9 do 15" in captured["history_text"]
+
+
+def test_standalone_question_with_its_own_new_topic_skips_rewrite():
+    llm = _FakeLLM(["nebitno"], rewrite=lambda *_: "ne treba")
+    system = _system_with(
+        llm,
+        [_chunk("Studentska služba radi od 9 do 15.", "a.pdf", page=1, type="pdf")],
+    )
+    history = [
+        {"role": "user", "content": "Od kada radi studentska služba?"},
+        {
+            "role": "assistant",
+            "content": "Studentska služba radi od 9 do 15 [Izvor 1].",
+        },
+    ]
+
+    standalone = system._standalone_question("Od kada radi biblioteka?", history)
+
+    assert standalone == "Od kada radi biblioteka?"
+    assert llm.rewrite_calls == 0
+
+
 def test_dedupe_chunks_removes_repeated_text():
     chunks = [
         _chunk("isti tekst", "a.pdf", page=1),

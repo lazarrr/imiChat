@@ -122,6 +122,30 @@ def test_rewrite_uses_fixed_seed_and_greedy_decoding():
     assert options["seed"] == 7
 
 
+def test_rewrite_prompt_forbids_swapping_a_newly_named_topic():
+    manager = _manager(["Koliko modula ima na informatici?"])
+    history = "Matematika ima tri modula: Analiza, Algebra i Geometrija."
+
+    manager.rewrite_query(history, "A koliko ima na informatici?", is_unclear=False)
+
+    prompt = manager._client.calls[0]["prompt"]
+    assert "ne zamenjuj je temom iz prethodnog odgovora" in prompt
+    assert "a koliko ima na informatici" in prompt
+    assert "Koliko modula ima na informatici?" in prompt
+    assert "Od kada studentska sluzba radi sa studentima?" in prompt
+
+
+def test_unclear_rewrite_prompt_also_keeps_a_newly_named_topic():
+    manager = _manager(["Koliko modula ima na informatici?"])
+    history = "Matematika ima tri modula."
+
+    manager.rewrite_query(history, "A koliko ima na informatici?", is_unclear=True)
+
+    prompt = manager._client.calls[0]["prompt"]
+    assert "imenuje DRUGU temu" in prompt
+    assert "ne zamenjuj je temom iz prethodnog" in prompt
+
+
 def test_rewrite_without_history_returns_question_unchanged():
     manager = _manager(["ne sme se pozvati"])
 

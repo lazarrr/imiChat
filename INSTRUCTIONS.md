@@ -231,16 +231,19 @@ curl -X POST http://localhost:8000/chat/stream \
 **What the chatbot does internally on turn 2:**
 1. Detects this is a follow-up (session `abc123` has history).
 2. Skips the LLM rewrite if a heuristic already considers the question
-   standalone. Purely referential follow-ups (`"Šta možeš o njima?"`) also
-   skip the LLM entirely and retrieve with the previous question — the exact
-   query that produced the context being asked about — so the same follow-up
-   always retrieves the same chunks. Other follow-ups call Llama 3.1
-   (bounded by a timeout, temperature 0, fixed seed) to rewrite them using
-   the previous *questions and answers*; successful rewrites are cached by
-   `(history, question)` so they are reproducible, and a rewrite that drifts
-   from the conversation topic is rejected. On failure, timeout or rejection
-   a deterministic fallback retrieves with the previous clear question (plus
-   the new one when it has its own topic).
+   standalone. A short predicate follow-up that names no topic of its own
+   ("Od kad radi sa studentima?" after "Od kada radi studentska služba?")
+   is not considered standalone: its elided subject is filled in by the
+   rewrite from the previous answer. Referential follow-ups
+   (`"Šta možeš o njima?"`) and other context-dependent questions are
+   rewritten by Llama 3.1 (bounded by a timeout, temperature 0, fixed
+   seed) using the model's previous *answer* and the latest question;
+   successful rewrites are cached by `(history, question)` so they are
+   reproducible. A rewrite that drifts from the conversation topic, or
+   that swaps the topic explicitly named in the latest question for the
+   one from the previous answer, is rejected. On failure, timeout or
+   rejection a deterministic fallback retrieves with the previous clear
+   question (plus the new one when it has its own topic).
 3. Embeds the **rewritten** question (with `query: ` prefix) and retrieves
    relevant chunks with hybrid dense (E5) + BM25 search, fused by
    Reciprocal Rank Fusion. If that returns nothing, the original question

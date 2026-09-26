@@ -338,6 +338,9 @@ class LLMManager:
         it names the entities a referential follow-up ("what can you tell me
         about them?") points to.  The prompt demands that the rewritten
         question names its topic explicitly, otherwise it is not standalone.
+        It also forbids swapping a topic the latest question names itself
+        ("a koliko ima na informatici" after an answer about matematika)
+        for the topic of the previous answer.
 
         Rewrites are deterministic: temperature is 0, a fixed seed is set,
         and the successful result is cached by (context, question, unclear),
@@ -360,24 +363,50 @@ class LLMManager:
                 "1. Zameni nejasne reci (npr. 'njima', 'to', 'tim') konkretnim "
                 "pojmovima iz prethodnog ODGOVORA asistenta (nazivi smerova, "
                 "modula, predmeta, programa).\n"
-                "2. Prepisano pitanje mora jasno da imenuje temu o kojoj se "
+                "2. Ako najnovije pitanje ipak imenuje DRUGU temu od prethodnog "
+                "odgovora (npr. drugi smer, modul, predmet ili program), tu "
+                "temu OBAVEZNO zadrzi i ne zamenjuj je temom iz prethodnog "
+                "odgovora. Iz prethodnog odgovora preuzmi samo ono sto u "
+                "najnovijem pitanju nedostaje.\n"
+                "3. Prepisano pitanje mora jasno da imenuje temu o kojoj se "
                 "govori (npr. naziv programa, smera, modula ili predmeta), "
                 "koristeci pojmove iz prethodnog ODGOVORA i najnovijeg "
                 "pitanja — bez toga pitanje nije samostalno.\n"
-                "3. Ako najnovije pitanje trazi DODATNE informacije o necemu "
+                "4. Ako najnovije pitanje trazi DODATNE informacije o necemu "
                 "iz prethodnog odgovora, prepisi ga tako da jasno imenuje "
                 "temu o kojoj se traze dodatne informacije, ali NE dodaj "
                 "nove cinjenice.\n"
-                "4. Ne izmisljaj pojmove kojih nema u istoriji razgovora.\n"
-                "5. Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
+                "5. Ne izmisljaj pojmove kojih nema u istoriji razgovora.\n"
+                "6. Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
             )
         else:
             reference_rule = (
                 "Ako se najnovije pitanje odnosi na nesto iz prethodnog "
                 "ODGOVORA asistenta, razresi to pomocu tog odgovora i sacuvaj "
                 "temu najnovijeg pitanja.\n"
-                "Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
+                "1. Ako najnovije pitanje imenuje DRUGU temu od prethodnog "
+                "odgovora (npr. drugi smer, modul, predmet ili program), tu "
+                "temu OBAVEZNO zadrzi i ne zamenjuj je temom iz prethodnog "
+                "odgovora. Iz prethodnog odgovora preuzmi samo ono sto u "
+                "najnovijem pitanju nedostaje (npr. predmet ili radnju), "
+                "a ne i temu.\n"
+                "2. Ako najnovije pitanje pita o svojstvu (npr. radnom "
+                "vremenu ili nacinu rada) entiteta iz prethodnog odgovora, "
+                "prepisi ga tako da jasno imenuje taj entitet.\n"
+                "3. Ne izmisljaj pojmove kojih nema u istoriji razgovora.\n"
+                "4. Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
             )
+
+        examples = (
+            "Primeri:\n"
+            "- Prethodni odgovor govori o modulima na matematici, a najnovije "
+            "pitanje je 'a koliko ima na informatici'. Ispravno: 'Koliko "
+            "modula ima na informatici?'. Neispravno: 'Koliko modula ima na "
+            "matematici?'.\n"
+            "- Prethodni odgovor govori o radnom vremenu studentske sluzbe, "
+            "a najnovije pitanje je 'od kad radi sa studentima'. Ispravno: "
+            "'Od kada studentska sluzba radi sa studentima?'.\n\n"
+        )
 
         prompt = (
             "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
@@ -388,7 +417,8 @@ class LLMManager:
             "Najnovije pitanje: "
             f"{latest_question}\n\n"
             "Pravila:\n"
-            + reference_rule)
+            + reference_rule
+            + examples)
 
         cache_key = self._rewrite_cache_key(
             history_text, latest_question, is_unclear

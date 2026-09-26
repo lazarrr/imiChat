@@ -1,0 +1,34 @@
+# Runtime dependencies for the Web API (src/) deployed to Cloud Run.
+# The root requirements.txt covers the full local toolchain (scraper, CLI,
+# notebooks); this file only lists what the API imports at runtime so the
+# container stays small and builds fast.
+#
+# PyTorch is installed separately in the Dockerfile from the CPU-only wheel
+# index, so it is intentionally not listed here.
+
+# Web framework
+fastapi>=0.109.0
+uvicorn[standard]>=0.25.0
+pydantic>=2.5.0
+pydantic-settings>=2.0.0
+
+# Vector database (pinned to the server image version: chromadb/chroma:latest → 1.5.9)
+chromadb==1.5.9
+
+# Embeddings
+sentence-transformers>=2.2.0
+
+# Text processing
+langchain-core>=0.1.0
+langchain-text-splitters>=0.1.0
+langdetect>=1.0.9
+cyrtranslit>=1.0.0
+numpy>=1.24.0
+pdfplumber>=0.9.0
+python-docx>=1.0.0
+beautifulsoup4>=4.13.0
+trafilatura>=1.6.0
+requests>=2.32.0
+
+# LLM client (used for the local Ollama backend; remote uses requests)
+ollama>=0.1.0

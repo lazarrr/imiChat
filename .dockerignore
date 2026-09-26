@@ -1,0 +1,16 @@
+# Build context = repository root (see src/Dockerfile)
+.git
+.env
+.env.*
+data
+notebooks
+tests
+web_ui
+scripts
+__pycache__
+**/__pycache__
+.pytest_cache
+*.egg-info
+.vscode
+.idea
+.DS_Store

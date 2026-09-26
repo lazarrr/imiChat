@@ -15,6 +15,7 @@ Key fixes applied here (see previous review for full context):
 import os
 import hashlib
 import logging
+from urllib.parse import urlparse
 
 import chromadb
 import numpy as np
@@ -39,10 +40,7 @@ class VectorStoreManager:
             config.EMBEDDING_MODEL,
             device=config.EMBEDDING_DEVICE,
         )
-        self.client = chromadb.PersistentClient(
-            path=config.VECTOR_DB_PATH,
-            settings=ChromaSettings(anonymized_telemetry=False),
-        )
+        self.client = self._build_chroma_client()
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
             chunk_overlap=config.CHUNK_OVERLAP,
@@ -59,6 +57,60 @@ class VectorStoreManager:
             chunk_size=config.CHUNK_SIZE,
             chunk_overlap=config.CHUNK_OVERLAP,
         )
+
+    # ------------------------------------------------------------------ #
+    #  Client construction                                                 #
+    # ------------------------------------------------------------------ #
+
+    def _build_chroma_client(self):
+        """
+        Create the Chroma client.
+
+        ``CHROMA_API_IMPL=rest`` connects to a Chroma server (Cloud Run)
+        over HTTP(S); anything else keeps the local persistent store.
+        """
+        impl = str(getattr(self.config, "CHROMA_API_IMPL", "persistent")).strip().lower()
+        if impl in ("rest", "http", "server"):
+            host, port, ssl = self._parse_chroma_server()
+            logger.info("Chroma client: REST at %s:%s (ssl=%s)", host, port, ssl)
+            # Pass the resolved address explicitly: chromadb's own Settings
+            # also read CHROMA_SERVER_HOST from the environment, and a
+            # mismatch between the two would raise on client creation.
+            return chromadb.HttpClient(
+                host=host,
+                port=port,
+                ssl=ssl,
+                settings=ChromaSettings(
+                    anonymized_telemetry=False,
+                    chroma_server_host=host,
+                    chroma_server_http_port=port,
+                    chroma_server_ssl_enabled=ssl,
+                ),
+            )
+        logger.info("Chroma client: persistent at %s", self.config.VECTOR_DB_PATH)
+        return chromadb.PersistentClient(
+            path=self.config.VECTOR_DB_PATH,
+            settings=ChromaSettings(anonymized_telemetry=False),
+        )
+
+    def _parse_chroma_server(self) -> tuple[str, int, bool]:
+        """
+        Resolve the Chroma server address from config.
+
+        CHROMA_SERVER_HOST may be a bare host (``chroma.internal``) or a
+        full URL (``https://chromadb-service-xxx.a.run.app``), in which
+        case scheme and port are taken from the URL.
+        """
+        raw = str(getattr(self.config, "CHROMA_SERVER_HOST", "localhost")).strip()
+        port = int(getattr(self.config, "CHROMA_SERVER_PORT", 8000))
+        ssl = bool(getattr(self.config, "CHROMA_SERVER_SSL", False))
+        if "://" in raw:
+            parsed = urlparse(raw)
+            host = parsed.hostname or "localhost"
+            ssl = parsed.scheme == "https"
+            port = parsed.port or (443 if ssl else 8000)
+            return host, port, ssl
+        return raw or "localhost", port, ssl
 
     # ------------------------------------------------------------------ #
     #  Embeddings                                                          #

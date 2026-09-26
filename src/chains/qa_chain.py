@@ -30,7 +30,10 @@ Multi-turn conversation support
   previous turns (deterministically when possible, otherwise with exactly
   one bounded LLM rewrite), and questions that cannot be resolved from
   prior context skip retrieval and generation entirely and get the fixed
-  refusal.
+  refusal.  A short predicate question whose subject was named only in the
+  previous turn ("Od kad radi sa studentima?" after "Od kada radi
+  studentska služba?") is treated as context-dependent even though it looks
+  standalone, so the elided subject is filled in before retrieval.
 - Follow-ups asking for *additional* information about the previous answer
   retrieve deeper (larger k) and exclude the chunks that already produced
   that answer, so the model expands with new facts instead of repeating.
@@ -74,6 +77,21 @@ def _normalize_for_match(text: str) -> str:
     text = unicodedata.normalize("NFKD", text)
     text = "".join(ch for ch in text if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _same_term(word: str, other: str) -> bool:
+    """Inflection-tolerant word match.
+
+    Two words are the same term when they share a 4-character prefix
+    (``student``/``studentima``) or one is the prefix of the other
+    (``kad``/``kada``), which absorbs the Serbian case endings the
+    heuristics here rely on.
+    """
+    return (
+        word[:4] == other[:4]
+        or other.startswith(word)
+        or word.startswith(other)
+    )
 
 
 # ── answer → source attribution (fallback for uncited answers) ──────── #
@@ -472,6 +490,20 @@ _CONTINUATION_PREFIX = re.compile(
     r"koliko još|gde još|kako to)\b"
 )
 
+# Predicates that commonly appear in short follow-ups whose subject is the
+# entity from the previous turn ("od kad radi sa studentima?" after "od
+# kada radi studentska služba?").  Such a question looks self-contained but
+# names no topic of its own, so with history present it is resolved by the
+# rewrite instead of being retrieved verbatim.
+_ELIDED_SUBJECT_REGEX = re.compile(
+    r"(?i)\b(?:radi|rade|počinje|pocinje|počinju|pocinju|završava|"
+    r"zavrsava|završavaju|zavrsavaju|traje|traju|održava|odrzava|"
+    r"održavaju|odrzavaju|nalazi|nalaze|prima|primaju|izdaje|izdaju|"
+    r"drži|drzi|otvara|zatvara|obavlja|obavljaju|dežura|dezura|"
+    r"naplaćuje|naplacuje|isplaćuje|isplacuje)\b"
+)
+_ELIDED_SUBJECT_MAX_WORDS = 8
+
 # Generic phrases that carry no topic of their own, used to detect a
 # follow-up that is only "tell me more about that/them".
 _FOLLOWUP_STOPWORDS = {
@@ -817,19 +849,73 @@ class UniversityQASystem:
         follow-up phrasing ("what can you tell me about them")."""
         return bool(UniversityQASystem._content_words(question))
 
+    def _is_elided_subject_followup(
+        self, question: str, history: list[dict[str, str]]
+    ) -> bool:
+        """
+        True for a short predicate question whose subject was named only in
+        the previous turn ("Od kad radi sa studentima?" after "Od kada radi
+        studentska služba?").
+
+        The question passes the standalone heuristic (enough words, no
+        pronouns, no continuation prefix) but names no topic of its own:
+        every content word already appears in the previous question or the
+        last answer.  Retrieving it verbatim pulls in unrelated documents
+        that merely share words like "radi" or "studenti", so it is routed
+        through the rewrite, which fills in the elided subject.
+        """
+        if not history:
+            return False
+        if len(re.findall(r"\w+", question)) > _ELIDED_SUBJECT_MAX_WORDS:
+            return False
+        if not _ELIDED_SUBJECT_REGEX.search(question):
+            return False
+
+        words = self._content_words(question)
+        if not words:
+            return False
+
+        anchors = self._content_words(
+            self._previous_user_question(question, history)
+        )
+        for msg in reversed(history):
+            if msg.get("role") == "assistant":
+                anchors |= self._content_words(msg.get("content", ""))
+                break
+        if not anchors:
+            return False
+
+        return all(
+            any(_same_term(word, anchor) for anchor in anchors) for word in words
+        )
+
     def _rewrite_keeps_topic(
         self, rewritten: str, question: str, history: list[dict[str, str]]
     ) -> bool:
         """Reject a rewrite that drifted away from the conversation topic.
 
-        The rewritten query must share at least one content word (compared
-        by a 4-character prefix, which absorbs Serbian inflection) with the
-        current question, the previous clear question or the last assistant
-        answer.  A rewrite that shares nothing is treated as a hallucination
-        and the deterministic fallback is used instead.
+        Two conditions must hold.  First, the rewrite must keep the topic of
+        the latest question: when the question has content words, at least
+        one of them must survive in the rewrite (compared by a 4-character
+        prefix, which absorbs Serbian inflection).  This is what stops a
+        rewrite from silently swapping the named subject for the topic of
+        the previous answer ("a koliko ima na informatici?" must not become
+        a question about matematika).  Second, the rewrite must share at
+        least one content word with the current question, the previous clear
+        question or the last assistant answer.  A rewrite that fails either
+        check is treated as a hallucination and the deterministic fallback
+        is used instead.
         """
         rewrite_words = self._content_words(rewritten)
         if not rewrite_words:
+            return False
+
+        question_words = self._content_words(question)
+        if question_words and not any(
+            _same_term(word, rewrite_word)
+            for word in question_words
+            for rewrite_word in rewrite_words
+        ):
             return False
 
         anchors = self._content_words(question)
@@ -843,8 +929,11 @@ class UniversityQASystem:
 
         if not anchors:
             return True
-        anchor_prefixes = {word[:4] for word in anchors}
-        return any(word[:4] in anchor_prefixes for word in rewrite_words)
+        return any(
+            _same_term(word, anchor)
+            for word in rewrite_words
+            for anchor in anchors
+        )
 
     def _context_fallback_query(
         self, question: str, history: list[dict[str, str]]
@@ -950,7 +1039,7 @@ class UniversityQASystem:
                 len(rewritten),
             )
             return None
-        if unclear and not self._rewrite_keeps_topic(rewritten, question, history):
+        if not self._rewrite_keeps_topic(rewritten, question, history):
             logger.warning("Rewrite drifted from the conversation topic")
             return None
 
@@ -963,7 +1052,11 @@ class UniversityQASystem:
         """
         Decision flow executed once per incoming question:
 
-        1. Standalone (cheap heuristic)      → embed the question as-is.
+        1. Standalone (cheap heuristic)      → embed the question as-is,
+           unless history turns it into a context-dependent follow-up: a
+           short predicate question whose subject was named only in the
+           previous turn ("Od kad radi sa studentima?") is resolved from
+           the previous turns instead.
         2. Ambiguous / context-dependent     → resolve from previous turns:
            a. no usable prior context        → unresolvable: skip retrieval
               and generation, fixed refusal;
@@ -974,7 +1067,9 @@ class UniversityQASystem:
         3. Short/vague but topical           → verbatim without history,
               rewrite (as above) with history.
         """
-        if self._looks_standalone(question):
+        if self._looks_standalone(question) and not self._is_elided_subject_followup(
+            question, history
+        ):
             return _QueryPlan(question, "standalone")
 
         unclear = self._is_unclear_question(question)
