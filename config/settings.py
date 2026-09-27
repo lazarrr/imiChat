@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     LLM_MODEL: str = "llama3.1:latest"
     # True  → local Ollama server (LLM_OLLAMA_BASE_URL)
     # False → remote OpenAI-compatible server (LLM_REMOTE_* below)
-    LLM_USE_LOCAL: bool = True
+    LLM_USE_LOCAL: bool = False
     LLM_TEMPERATURE: float = 0.0
     # Upper bound on generated answers (tokens). Kept low so responses stay
     # concise and generation finishes quickly on CPU.

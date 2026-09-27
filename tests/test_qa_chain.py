@@ -46,20 +46,23 @@ class _FakeLLM:
         self.rewrite = rewrite
         self.rewrite_calls = 0
         self.chat_calls = 0
+        self.messages = None
 
     def chat_stream(self, messages):
         self.chat_calls += 1
+        self.messages = messages
         yield from self._tokens
 
     def chat(self, messages):
         self.chat_calls += 1
+        self.messages = messages
         return "".join(self._tokens)
 
-    def rewrite_query(self, history_text, question, is_unclear=False, timeout=None):
+    def rewrite_query(self, history_text, question, timeout=None):
         self.rewrite_calls += 1
         if self.rewrite is None:
             return question
-        return self.rewrite(history_text, question, is_unclear)
+        return self.rewrite(history_text, question)
 
 
 class _FakeTranslator:
@@ -82,9 +85,11 @@ def _system_with(llm, chunks):
     return system
 
 
-def _collect(system, question):
+def _collect(system, question, history=None):
     async def run():
-        return [event async for event in system.query_stream(question)]
+        return [
+            event async for event in system.query_stream(question, history)
+        ]
 
     return asyncio.run(run())
 
@@ -226,32 +231,37 @@ def test_grounded_answer_starting_with_na_osnovu_konteksta_is_not_refusal():
     assert not _is_refusal(answer)
 
 
-def test_standalone_heuristic_skips_rewrite_for_explicit_questions():
-    assert UniversityQASystem._looks_standalone(
-        "Koliko ESPB nosi predmet Uvod u programiranje?"
-    )
-    assert not UniversityQASystem._looks_standalone("Koji su preduslovi za njega?")
-    assert not UniversityQASystem._looks_standalone("Koliko ESPB ima?")
-    assert not UniversityQASystem._looks_standalone("Objasni mi to detaljnije.")
+def test_rewrite_transcript_keeps_both_roles_and_recent_turns():
+    history = [
+        {"role": "user", "content": "Koliko modula ima Informatika?"},
+        {"role": "assistant", "content": "Informatika ima dva modula."},
+    ]
+
+    transcript = UniversityQASystem._format_history_for_rewrite(history)
+
+    assert "Korisnik: Koliko modula ima Informatika?" in transcript
+    assert "Asistent: Informatika ima dva modula." in transcript
 
 
-def test_unclear_patterns_cover_demonstratives():
-    assert UniversityQASystem._is_unclear_question(
-        "A ko je rukovodilac tog projekta?"
-    )
-    assert UniversityQASystem._is_unclear_question(
-        "Šta možeš da mi kažeš o njima?"
-    )
-    assert not UniversityQASystem._is_unclear_question(
-        "Koliko ESPB nosi predmet Uvod u programiranje?"
-    )
+def test_rewrite_transcript_is_bounded():
+    history = [
+        {"role": "user", "content": "p" * 500},
+        {"role": "assistant", "content": "a" * 5000},
+    ]
+
+    transcript = UniversityQASystem._format_history_for_rewrite(history)
+
+    assert len(transcript) <= UniversityQASystem._REWRITE_HISTORY_CHAR_LIMIT
+    assert "..." in transcript
 
 
 def test_rewrite_failure_uses_previous_question_for_pure_followup():
     chunks = [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
-    # _FakeLLM echoes the question, so the rewrite is "unchanged" and the
-    # deterministic context fallback must kick in.
-    system = _system(["nebitno"], chunks)
+    # An empty rewrite means the operation-A call failed; the deterministic
+    # context fallback must kick in for a purely referential follow-up.
+    system = _system_with(
+        _FakeLLM(["nebitno"], rewrite=lambda *_: ""), chunks
+    )
     history = [
         {"role": "user", "content": "Koliko ima smerova na OAS informatika?"},
         {"role": "assistant", "content": "Postoje dva smera."},
@@ -266,7 +276,9 @@ def test_rewrite_failure_uses_previous_question_for_pure_followup():
 
 def test_rewrite_failure_combines_when_followup_has_its_own_topic():
     chunks = [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
-    system = _system(["nebitno"], chunks)
+    system = _system_with(
+        _FakeLLM(["nebitno"], rewrite=lambda *_: ""), chunks
+    )
     history = [
         {"role": "user", "content": "Koliko ima smerova na OAS informatika?"},
         {"role": "assistant", "content": "Postoje dva smera."},
@@ -282,12 +294,12 @@ def test_rewrite_failure_combines_when_followup_has_its_own_topic():
     )
 
 
-def test_pure_referential_followup_is_rewritten_from_previous_answer():
+def test_pure_referential_followup_is_rewritten_using_the_transcript():
     captured = {}
 
-    def rewrite(history_text, question, is_unclear):
+    def rewrite(history_text, question):
         captured["history_text"] = history_text
-        captured["is_unclear"] = is_unclear
+        captured["question"] = question
         return "Šta možeš da mi kažeš o smerovima?"
 
     llm = _FakeLLM(["nebitno"], rewrite=rewrite)
@@ -305,9 +317,9 @@ def test_pure_referential_followup_is_rewritten_from_previous_answer():
 
     assert standalone == "Šta možeš da mi kažeš o smerovima?"
     assert llm.rewrite_calls == 1
-    assert captured["is_unclear"] is True
-    assert "Postoje dva smera." in captured["history_text"]
-    assert "Koliko ima smerova na OAS informatici?" not in captured["history_text"]
+    assert captured["question"] == "Šta možeš da mi kažeš o njima?"
+    assert "Asistent: Postoje dva smera." in captured["history_text"]
+    assert "Korisnik: Koliko ima smerova na OAS informatici?" in captured["history_text"]
 
 
 def test_followup_chain_anchors_to_last_clear_question():
@@ -415,7 +427,7 @@ def test_rewrite_that_keeps_the_named_topic_and_fills_the_gap_is_used():
 def test_subject_elided_followup_is_rewritten_from_previous_answer():
     captured = {}
 
-    def rewrite(history_text, question, is_unclear):
+    def rewrite(history_text, question):
         captured["history_text"] = history_text
         return "Od kada studentska služba radi sa studentima?"
 
@@ -439,12 +451,18 @@ def test_subject_elided_followup_is_rewritten_from_previous_answer():
     assert "Studentska služba radi od 9 do 15" in captured["history_text"]
 
 
-def test_standalone_question_with_its_own_new_topic_skips_rewrite():
-    llm = _FakeLLM(["nebitno"], rewrite=lambda *_: "ne treba")
+def test_semantically_standalone_question_is_used_unchanged():
+    # History is present, so the semantic operation-A call runs; the model
+    # decides the new question is self-contained and returns it unchanged.
+    llm = _FakeLLM(["nebitno"], rewrite=lambda history_text, question: question)
     system = _system_with(
         llm,
         [_chunk("Studentska služba radi od 9 do 15.", "a.pdf", page=1, type="pdf")],
     )
+    retriever = _CountingRetriever(
+        [_chunk("Studentska služba radi od 9 do 15.", "a.pdf", page=1, type="pdf")]
+    )
+    system.retriever = retriever
     history = [
         {"role": "user", "content": "Od kada radi studentska služba?"},
         {
@@ -453,10 +471,10 @@ def test_standalone_question_with_its_own_new_topic_skips_rewrite():
         },
     ]
 
-    standalone = system._standalone_question("Od kada radi biblioteka?", history)
+    _collect(system, "Od kada radi biblioteka?", history)
 
-    assert standalone == "Od kada radi biblioteka?"
-    assert llm.rewrite_calls == 0
+    assert llm.rewrite_calls == 1
+    assert retriever.queries == ["Od kada radi biblioteka?"]
 
 
 def test_dedupe_chunks_removes_repeated_text():
@@ -576,7 +594,10 @@ def test_stream_without_retrieved_chunks_refuses_immediately():
     assert events[-1] == SourcesChunk([])
 
 
-def test_unresolvable_followup_skips_retrieval_and_generation():
+def test_referential_followup_without_history_retrieves_original():
+    # No previous conversation: the request is treated as standalone (no
+    # rewrite call) and searched with its original wording.  The answer
+    # model can refuse if the retrieved context holds nothing relevant.
     llm = _FakeLLM(["nebitno"])
     system = _system_with(
         llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
@@ -586,13 +607,11 @@ def test_unresolvable_followup_skips_retrieval_and_generation():
     )
     system.retriever = retriever
 
-    events = _collect(system, "Šta možeš da mi kažeš o njima?")
+    _collect(system, "Šta možeš da mi kažeš o njima?")
 
-    assert events[0] == TokenChunk(REFUSAL_PHRASE)
-    assert events[-1] == SourcesChunk([])
-    assert retriever.queries == []
-    assert llm.chat_calls == 0
+    assert retriever.queries == ["Šta možeš da mi kažeš o njima?"]
     assert llm.rewrite_calls == 0
+    assert llm.chat_calls == 1
 
 
 def test_short_topical_question_without_history_retrieves_verbatim():
@@ -637,3 +656,216 @@ def test_retrieval_uses_rewritten_query_for_followup():
     assert retriever.queries == [
         "Koji su preduslovi za predmet Uvod u programiranje?"
     ]
+
+
+def test_prompt_contains_only_system_and_current_turn():
+    llm = _FakeLLM(["Prva činjenica [Izvor 1]."])
+    system = _system_with(
+        llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
+    )
+    history = [
+        {"role": "user", "content": "Koliko ESPB nosi Uvod u programiranje?"},
+        {"role": "assistant", "content": "Predmet nosi 6 ESPB."},
+    ]
+
+    _collect(system, "Koliko ESPB nosi Uvod u programiranje?", history)
+
+    assert [m["role"] for m in llm.messages] == ["system", "user"]
+    user_content = llm.messages[1]["content"]
+    assert "Predmet nosi 6 ESPB." not in user_content
+    assert "Pitanje: Koliko ESPB nosi Uvod u programiranje?" in user_content
+    assert "Prva činjenica." in user_content
+
+
+def test_prompt_uses_resolved_question_for_followup():
+    llm = _FakeLLM(
+        ["Prva činjenica [Izvor 1]."],
+        rewrite=lambda *_: "Koji su preduslovi za predmet Uvod u programiranje?",
+    )
+    system = _system_with(
+        llm, [_chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")]
+    )
+    history = [
+        {"role": "user", "content": "Koliko ESPB nosi predmet Uvod u programiranje?"},
+        {"role": "assistant", "content": "Predmet Uvod u programiranje nosi 6 ESPB."},
+    ]
+
+    _collect(system, "Koji su preduslovi za njega?", history)
+
+    assert [m["role"] for m in llm.messages] == ["system", "user"]
+    user_content = llm.messages[1]["content"]
+    assert (
+        "Pitanje: Koji su preduslovi za predmet Uvod u programiranje?"
+        in user_content
+    )
+    assert "Koji su preduslovi za njega?" not in user_content
+    assert "Predmet Uvod u programiranje nosi 6 ESPB." not in user_content
+
+
+# ── required end-to-end scenarios ───────────────────────────────────── #
+
+
+def _scenario_system(llm, retriever_chunks):
+    system = _system_with(llm, retriever_chunks)
+    retriever = _CountingRetriever(retriever_chunks)
+    system.retriever = retriever
+    return system, retriever
+
+
+def test_scenario_1_standalone_question_needs_no_rewrite():
+    chunk = _chunk(
+        "Informatika ima dva modula: Softversko inženjerstvo i "
+        "Informacioni sistemi.",
+        "informatika.pdf",
+        page=1,
+        type="pdf",
+    )
+    llm = _FakeLLM(["Informatika ima dva modula [Izvor 1]."])
+    system, retriever = _scenario_system(llm, [chunk])
+
+    _collect(system, "Koliko modula ima Informatika?")
+
+    # No history → no operation-A call, search uses the question as-is and
+    # the answer prompt carries only the question plus the retrieved chunk.
+    assert llm.rewrite_calls == 0
+    assert retriever.queries == ["Koliko modula ima Informatika?"]
+    assert [m["role"] for m in llm.messages] == ["system", "user"]
+    user_content = llm.messages[1]["content"]
+    assert "Pitanje: Koliko modula ima Informatika?" in user_content
+    assert "Informatika ima dva modula: Softversko" in user_content
+
+
+def test_scenario_2_followup_is_rewritten_before_search_and_answer():
+    rewritten = (
+        "Koja su dva modula studijskog programa Informatika i koje su "
+        "njihove karakteristike?"
+    )
+    chunk = _chunk(
+        "Moduli su Softversko inženjerstvo i Informacioni sistemi.",
+        "informatika.pdf",
+        page=1,
+        type="pdf",
+    )
+    llm = _FakeLLM(
+        ["Moduli su Softversko inženjerstvo i Informacioni sistemi [Izvor 1]."],
+        rewrite=lambda *_: rewritten,
+    )
+    system, retriever = _scenario_system(llm, [chunk])
+    history = [
+        {"role": "user", "content": "Koliko modula ima Informatika?"},
+        {
+            "role": "assistant",
+            "content": "Informatika ima tačno dva modula.",
+        },
+    ]
+
+    _collect(system, "Možeš li mi reći nešto više o njima?", history)
+
+    assert llm.rewrite_calls == 1
+    assert retriever.queries == [rewritten]
+    assert [m["role"] for m in llm.messages] == ["system", "user"]
+    user_content = llm.messages[1]["content"]
+    assert f"Pitanje: {rewritten}" in user_content
+    # The conversation history never reaches the answer model.
+    assert "Informatika ima tačno dva modula." not in user_content
+    assert "Možeš li mi reći nešto više o njima?" not in user_content
+
+
+def test_scenario_3_pronoun_reference_is_resolved_from_history():
+    rewritten = "Gde se nalazi kabinet profesorke Višnje?"
+    chunk = _chunk(
+        "Kabinet profesorice Višnje nalazi se na drugom spratu.",
+        "profesori.pdf",
+        page=2,
+        type="pdf",
+    )
+    llm = _FakeLLM(
+        ["Kabinet se nalazi na drugom spratu [Izvor 1]."],
+        rewrite=lambda *_: rewritten,
+    )
+    system, retriever = _scenario_system(llm, [chunk])
+    history = [
+        {"role": "user", "content": "Ko je profesor Višnja?"},
+        {
+            "role": "assistant",
+            "content": "Višnja je profesor na Institutu za matematiku i informatiku.",
+        },
+    ]
+
+    _collect(system, "Gde mogu da pronađem njen kabinet?", history)
+
+    assert llm.rewrite_calls == 1
+    assert retriever.queries == [rewritten]
+    user_content = llm.messages[1]["content"]
+    assert f"Pitanje: {rewritten}" in user_content
+    assert "Višnja je profesor na Institutu" not in user_content
+
+
+def test_scenario_4_unrelated_question_is_not_influenced_by_history():
+    question = "Koji su uslovi za upis na master studije?"
+    chunk = _chunk(
+        "Uslovi za upis na master studije su završene osnovne studije.",
+        "upis.pdf",
+        page=3,
+        type="pdf",
+    )
+    # The semantic operation-A call returns the question unchanged because
+    # it is self-contained; the professor answer must not leak into the
+    # retrieval query or the final answer prompt.
+    llm = _FakeLLM(
+        ["Za upis na master studije potrebne su završene osnovne studije [Izvor 1]."],
+        rewrite=lambda history_text, q: q,
+    )
+    system, retriever = _scenario_system(llm, [chunk])
+    history = [
+        {"role": "user", "content": "Ko je profesor Višnja?"},
+        {
+            "role": "assistant",
+            "content": "Višnja je profesor na Institutu za matematiku i informatiku.",
+        },
+    ]
+
+    _collect(system, question, history)
+
+    assert llm.rewrite_calls == 1
+    assert retriever.queries == [question]
+    user_content = llm.messages[1]["content"]
+    assert f"Pitanje: {question}" in user_content
+    assert "Višnja" not in user_content
+    assert "profesor na Institutu" not in user_content
+
+
+def test_scenario_5_followup_resolves_reference_across_multiple_turns():
+    rewritten = "Gde se nalazi kabinet profesorke Višnje?"
+    captured = {}
+
+    def rewrite(history_text, question):
+        captured["history_text"] = history_text
+        return rewritten
+
+    chunk = _chunk(
+        "Kabinet profesorice Višnje nalazi se na drugom spratu.",
+        "profesori.pdf",
+        page=2,
+        type="pdf",
+    )
+    llm = _FakeLLM(["Kabinet se nalazi na drugom spratu [Izvor 1]."], rewrite=rewrite)
+    system, retriever = _scenario_system(llm, [chunk])
+    history = [
+        {"role": "user", "content": "Koji su uslovi za upis?"},
+        {"role": "assistant", "content": "Za upis su potrebni dokumenti."},
+        {"role": "user", "content": "Ko je profesor Višnja?"},
+        {
+            "role": "assistant",
+            "content": "Višnja je profesor na Institutu za matematiku i informatiku.",
+        },
+    ]
+
+    _collect(system, "A gde je njen kabinet?", history)
+
+    # The transcript for operation A spans several turns, so the reference
+    # can be resolved even though the entity was named two turns back.
+    assert "Koji su uslovi za upis?" in captured["history_text"]
+    assert "Ko je profesor Višnja?" in captured["history_text"]
+    assert "Višnja je profesor" in captured["history_text"]
+    assert retriever.queries == [rewritten]

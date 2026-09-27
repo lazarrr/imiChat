@@ -46,6 +46,8 @@ async def _stream_response(
 ) -> AsyncGenerator[str, None]:
     """Stream one answer as SSE frames and persist the turn afterwards."""
     history = get_history(session_id)
+    # Chunks used in the previous turn — a "more information" follow-up
+    # excludes them so the answer model gets fresh material instead.
     exclude_chunk_ids = get_used_chunk_ids(session_id)
     prune_sessions()  # occasional cleanup
 

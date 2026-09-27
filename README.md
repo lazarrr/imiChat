@@ -15,7 +15,7 @@ citation markers; the sources the model used are sent as a structured
 - RAG pipeline over university documents (HTML, PDF, DOCX)
 - Multi-turn conversations via FastAPI sessions (1-hour TTL)
 - Streaming responses (Server-Sent Events)
-- Query rewriting for follow-up questions
+- Semantic follow-up detection and query rewriting for context-dependent questions
 - Serbian Cyrillic ↔ Latin conversion
 - CLI and API interfaces
 
@@ -138,6 +138,9 @@ curl -X POST http://localhost:8000/chat/stream \
 
 On turn 2 the chatbot rewrites the follow-up into a standalone question
 (e.g. `"Koji su preduslovi za Uvod u programiranje?"`) before retrieving.
+Earlier turns are used only for that rewrite — the LLM prompt always
+carries just the resolved question and the freshly retrieved chunks, never
+the conversation history.
 
 ## Configuration
 

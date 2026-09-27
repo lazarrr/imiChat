@@ -6,9 +6,11 @@ v2 — Multi-turn conversation support
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 - Each request carries an optional ``session_id``.
 - The server maintains an in-memory conversation history per session.
-- Every turn: rewrite the question for retrieval → embed → search →
-  build full message list (system + history + context) → call
+- Every turn: decide semantically whether the request is a follow-up and
+  rewrite it into a standalone query if needed → embed → search → build
+  a two-message prompt (system + resolved question + context) → call
   Ollama /api/chat → stream tokens + sources → save turn to history.
+  History is never sent to the answer model.
 
 Module layout
 ~~~~~~~~~~~~~

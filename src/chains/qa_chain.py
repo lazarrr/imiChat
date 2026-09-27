@@ -22,26 +22,30 @@ to the chunks it visibly draws from.  Refusals suppress the source list
 entirely.
 
 Multi-turn conversation support
--------------------------------
+------------------------------
 - Maintains per-session conversation history (owned by the API layer).
-- Every question passes through a single decision flow (``_plan_query``):
-  a cheap heuristic classifies the question; standalone questions are
-  embedded as-is (no LLM call), ambiguous ones are resolved from the
-  previous turns (deterministically when possible, otherwise with exactly
-  one bounded LLM rewrite), and questions that cannot be resolved from
-  prior context skip retrieval and generation entirely and get the fixed
-  refusal.  A short predicate question whose subject was named only in the
-  previous turn ("Od kad radi sa studentima?" after "Od kada radi
-  studentska služba?") is treated as context-dependent even though it looks
-  standalone, so the elided subject is filled in before retrieval.
+- History is used for exactly one purpose: deciding whether the current
+  request can stand on its own and, when it cannot, rewriting it into a
+  standalone search query.  That is the single "operation A" LLM call in
+  ``_plan_query`` — it receives a bounded transcript of the conversation
+  and returns the current question unchanged when it is already
+  self-contained.  No keyword/regex classification is used: the semantic
+  relationship between the request and the conversation is judged by the
+  model.
+- The final answer ("operation B") never sees the conversation history.
+  The prompt is always exactly two messages: the system prompt and one user
+  message holding the retrieved context plus the *resolved* (standalone)
+  question.  This keeps every answer anchored to a single topic, prevents
+  earlier answers from contaminating the current one, and keeps the prompt
+  bounded (context is capped per-chunk and in total).
 - Follow-ups asking for *additional* information about the previous answer
   retrieve deeper (larger k) and exclude the chunks that already produced
   that answer, so the model expands with new facts instead of repeating.
-- Sends full message history to Ollama /api/chat with explicit num_ctx,
-  with stale citation markers stripped (numbers are re-assigned per turn).
-- Trims oldest turns when the token budget would be exceeded, and the
-  retrieved context itself is bounded (per-chunk and total) so retrieval
-  can never stuff the prompt.
+- When the operation-A call fails (timeout, empty or drifting output) a
+  deterministic fallback builds the best query it can from the previous
+  clear question; a request that cannot be resolved is still retrieved
+  with its original wording and the answer model may refuse when the
+  context contains nothing relevant.
 """
 
 from __future__ import annotations
@@ -56,12 +60,6 @@ from dataclasses import dataclass, field
 from src.chains.retriever import HybridRetriever, RetrievedChunk
 
 logger = logging.getLogger(__name__)
-
-
-# ── rough token estimator (char-based, ~4 chars / token) ────────────── #
-def _estimate_tokens(text: str) -> int:
-    """Fast, zero-dependency token count approximation."""
-    return max(1, len(text) // 4)
 
 
 # Fixed, deterministic refusal sentence — the prompt demands exactly this
@@ -407,51 +405,6 @@ class RetrievedIdsChunk:
     chunk_ids: list[str] = field(default_factory=list)
 
 
-# ── referential / unclear question markers (Serbian Latin + English) ── #
-_UNCLEAR_PATTERNS = [
-    r"\bnjih\b", r"\bnjima\b", r"\bnjihov\w*", r"\bnjega\b", r"\bnjemu\b",
-    r"\bnjegov\w*", r"\bnjene\b", r"\bnjen\w*", r"\bnjim\b", r"\bnjom\b",
-    r"\bnjoj\b",
-    r"\bih\b", r"\bga\b", r"\bmu\b",
-    r"\bon\b", r"\bona\b", r"\bono\b", r"\boni\b", r"\bone\b",
-    r"\bto\b", r"\bovo\b", r"\btim\b", r"\bte\b", r"\bti\b",
-    r"\btog\b", r"\btom\b", r"\btaj\b", r"\bta\b", r"\btu\b",
-    r"\btome\b", r"\btoga\b", r"\btih\b", r"\btima\b",
-    r"\bovaj\b", r"\bovu\b", r"\bovog\b", r"\bovom\b",
-    r"\bonaj\b", r"\bonu\b", r"\bonog\b", r"\bonoj\b",
-    r"\bisti\b", r"\bista\b", r"\bisto\b",
-    r"\btakav\b", r"\btakve\b", r"\btakva\b",
-    r"\btakvog\b", r"\btakvom\b", r"\btakvu\b", r"\btakvim\b", r"\btakvih\b",
-    r"\bpomenut\w*", r"\bnaveden\w*", r"\bprethodn\w*",
-    r"u vezi sa\b", r"vezano za\b", r"\bu tom\b", r"\bu tome\b",
-    r"\bo tom\b", r"\bo tome\b", r"\bu njoj\b", r"\bo njoj\b",
-    r"\bsa njim\b",
-    r"\bthem\b", r"\bit\b", r"\bthis\b", r"\bthese\b", r"\bthose\b",
-    r"\bthat\b", r"the same\b", r"\bmentioned\b", r"\babove\b",
-    r"više informacij\w*", r"vise informacij\w*", r"više o\b", r"vise o\b",
-    r"detaljnij\w*", r"opširnij\w*", r"opsirnij\w*", r"objasni\w*",
-    r"pojasni\w*",
-    r"nabroj\w*", r"koji su to\b", r"šta još\b", r"sta jos\b",
-    r"jos nesto\b", r"još nešto\b", r"nešto više\b", r"nesto vise\b",
-    r"više detalj\w*", r"vise detalj\w*", r"još detalj\w*", r"jos detalj\w*",
-    r"ima li još\b", r"ima li jos\b", r"imas li još\b", r"imas li jos\b",
-    r"znas li još\b", r"znas li jos\b", r"da li ima još\b", r"da li ima jos\b",
-    r"još nečega\b", r"jos necega\b", r"nešto još\b", r"nesto jos\b",
-    r"išta još\b", r"ista jos\b",
-    r"koji još\b", r"koji jos\b", r"koje još\b", r"koje jos\b",
-    r"kakve još\b", r"kakve jos\b", r"koliko još\b", r"koliko jos\b",
-    r"navedi još\b", r"navedi jos\b", r"nabroji još\b", r"nabroji jos\b",
-    r"reci još\b", r"reci jos\b", r"reci više\b", r"reci vise\b",
-    r"nastavi\b", r"pričaj više\b", r"pricaj vise\b",
-    r"dodatne informacij\w*", r"dodatn\w* detalj\w*",
-    r"more information", r"tell me more", r"explain\w*", r"elaborate\w*",
-    r"\bwhat else\b", r"\bany more\b", r"more details\b", r"\bmore about\b",
-]
-
-_UNCLEAR_REGEX = re.compile(
-    r"(?i)" + "|".join(f"(?:{p})" for p in _UNCLEAR_PATTERNS)
-)
-
 # ── "give me more information about the previous answer" follow-ups ──── #
 # Questions matching these ask for *additional* details about a topic
 # already discussed — retrieval must go deeper (larger k) and skip the
@@ -482,28 +435,6 @@ _MORE_INFO_REGEX = re.compile(
     r"(?i)" + "|".join(f"(?:{p})" for p in _MORE_INFO_PATTERNS)
 )
 
-# A question is treated as standalone when it has enough content words and
-# does not continue a previous sentence.
-_STANDALONE_MIN_WORDS = 4
-_CONTINUATION_PREFIX = re.compile(
-    r"(?i)^\s*(a|i|pa|ali|a šta|šta još|još|i šta|koji od|koje od|"
-    r"koliko još|gde još|kako to)\b"
-)
-
-# Predicates that commonly appear in short follow-ups whose subject is the
-# entity from the previous turn ("od kad radi sa studentima?" after "od
-# kada radi studentska služba?").  Such a question looks self-contained but
-# names no topic of its own, so with history present it is resolved by the
-# rewrite instead of being retrieved verbatim.
-_ELIDED_SUBJECT_REGEX = re.compile(
-    r"(?i)\b(?:radi|rade|počinje|pocinje|počinju|pocinju|završava|"
-    r"zavrsava|završavaju|zavrsavaju|traje|traju|održava|odrzava|"
-    r"održavaju|odrzavaju|nalazi|nalaze|prima|primaju|izdaje|izdaju|"
-    r"drži|drzi|otvara|zatvara|obavlja|obavljaju|dežura|dezura|"
-    r"naplaćuje|naplacuje|isplaćuje|isplacuje)\b"
-)
-_ELIDED_SUBJECT_MAX_WORDS = 8
-
 # Generic phrases that carry no topic of their own, used to detect a
 # follow-up that is only "tell me more about that/them".
 _FOLLOWUP_STOPWORDS = {
@@ -532,13 +463,13 @@ _FOLLOWUP_STOPWORDS = {
 class _QueryPlan:
     """Outcome of the per-question decision flow.
 
-    ``query`` is the retrieval query to embed and search.  When it is
-    ``None`` the question cannot be resolved from prior context: the chain
-    skips retrieval and generation entirely and answers with the fixed
-    refusal.  ``reason`` is a short label for the decision, used in logs.
+    ``query`` is the standalone retrieval query to embed and search — the
+    original question when it already stands on its own, or the rewritten
+    version when the operation-A model resolved it from the conversation.
+    ``reason`` is a short label for the decision, used in logs.
     """
 
-    query: str | None
+    query: str
     reason: str
 
 
@@ -646,8 +577,7 @@ class UniversityQASystem:
         "2. Informacije mogu biti u rečenicama, listama, tabelama i naslovima — "
         "iskoristite ih ako odgovaraju na pitanje. Ako pitanje traži dodatne "
         "informacije ili pojašnjenje, navedite konkretne detalje iz konteksta "
-        "(liste, nazive, uslove, predmete) umesto ponavljanja prethodnog "
-        "odgovora.\n"
+        "(liste, nazive, uslove, predmete).\n"
         "3. Ako odgovor nije moguće pronaći u kontekstu, odgovorite tačno "
         f'ovom rečenicom i ništa više: "{REFUSAL_PHRASE}"\n'
         "4. Uz svaku činjenicu koju preuzimate iz konteksta obavezno navedite "
@@ -674,10 +604,6 @@ class UniversityQASystem:
         self.config = config
         self.retriever = HybridRetriever(vector_store, config)
 
-        # Context-window ceiling (tokens) — derived from LLM config
-        self.num_ctx = getattr(
-            llm_manager, "num_ctx", getattr(config, "LLM_NUM_CTX", 8192)
-        )
         self.default_k = int(getattr(config, "TOP_K_RESULTS", 5))
         # Follow-ups that ask for additional information about the previous
         # answer retrieve deeper so new chunks (not the ones that produced
@@ -746,48 +672,56 @@ class UniversityQASystem:
             parts.append(block)
             total += len(block)
 
+        logger.info(
+            "Context: %d of %d retrieved chunk(s) passed to the LLM",
+            len(parts),
+            len(chunks),
+        )
         return "\n\n".join(parts)
 
     # ------------------------------------------------------------------ #
     #  Conversation history helpers                                        #
     # ------------------------------------------------------------------ #
 
-    # The rewrite prompt only ever sees the model's most recent answer; it
-    # is truncated to this many chars to keep that prompt focused.
-    _REWRITE_ANSWER_CHAR_LIMIT = 1200
+    # ── Operation A input: a bounded transcript of the conversation ──── #
+    # The follow-up/rewrite call receives the *whole* recent conversation
+    # (not just the last answer), so a reference can be resolved against an
+    # entity named several turns back.  Message count, per-message length
+    # and total length are capped so the rewrite prompt stays small even in
+    # long conversations.
+    _REWRITE_HISTORY_MAX_MESSAGES = 6
+    _REWRITE_USER_CHAR_LIMIT = 300
+    _REWRITE_ASSISTANT_CHAR_LIMIT = 600
+    _REWRITE_HISTORY_CHAR_LIMIT = 3200
 
-    @staticmethod
-    def _format_last_answer_for_rewrite(history: list[dict[str, str]]) -> str:
+    @classmethod
+    def _format_history_for_rewrite(cls, history: list[dict[str, str]]) -> str:
         """
-        Return the model's most recent answer as a compact text block for
-        the query-rewrite prompt.
+        Render the recent conversation as a compact ``role: content`` block
+        for the follow-up detection / query rewriting call.
 
-        Only the last assistant message is used: it names the entities a
-        referential follow-up ("šta možeš da mi kažeš o njima?") points to.
-        Previous turns are deliberately left out so the rewrite is built
-        from the answer rather than echoing the question that produced it.
+        The last few turns are kept (a follow-up can refer to an entity
+        named several messages back) while each message is truncated and
+        the total length capped.
         """
-        for msg in reversed(history):
-            if msg.get("role") != "assistant":
-                continue
+        lines: list[str] = []
+        for msg in history[-cls._REWRITE_HISTORY_MAX_MESSAGES:]:
             content = (msg.get("content") or "").strip()
             if not content:
-                return ""
-            if len(content) > UniversityQASystem._REWRITE_ANSWER_CHAR_LIMIT:
-                content = (
-                    content[: UniversityQASystem._REWRITE_ANSWER_CHAR_LIMIT] + "..."
-                )
-            return content
-        return ""
+                continue
+            if msg.get("role") == "user":
+                role, limit = "Korisnik", cls._REWRITE_USER_CHAR_LIMIT
+            else:
+                role, limit = "Asistent", cls._REWRITE_ASSISTANT_CHAR_LIMIT
+            if len(content) > limit:
+                content = content[:limit] + "..."
+            lines.append(f"{role}: {content}")
+        return "\n".join(lines)[-cls._REWRITE_HISTORY_CHAR_LIMIT:]
 
     @staticmethod
-    def _is_unclear_question(question: str) -> bool:
-        """
-        True if the question cannot stand on its own — it contains
-        pronouns or follow-up phrases ("more information", "explain",
-        "njih", "them"...) that refer to earlier context.
-        """
-        return bool(_UNCLEAR_REGEX.search(question))
+    def _same_query(left: str, right: str) -> bool:
+        """True when two queries are identical apart from case/diacritics."""
+        return _normalize_for_match(left) == _normalize_for_match(right)
 
     @staticmethod
     def _is_more_info_followup(question: str) -> bool:
@@ -799,29 +733,15 @@ class UniversityQASystem:
         return bool(_MORE_INFO_REGEX.search(question))
 
     @staticmethod
-    def _looks_standalone(question: str) -> bool:
-        """
-        Cheap heuristic used to skip the LLM rewrite entirely: a question
-        with enough content words that neither contains referential markers
-        nor continues a previous sentence is already standalone.
-        """
-        stripped = question.strip()
-        if not stripped or UniversityQASystem._is_unclear_question(stripped):
-            return False
-        if len(re.findall(r"\w+", stripped)) < _STANDALONE_MIN_WORDS:
-            return False
-        if _CONTINUATION_PREFIX.match(stripped):
-            return False
-        return True
-
-    @staticmethod
     def _previous_user_question(question: str, history: list[dict[str, str]]) -> str:
         """Return the most recent user question that is not the current one.
 
         Referential questions ("a šta je sa njima?") are skipped when an
         older, self-contained question exists: they carry no topic of their
         own and would retrieve badly.  This keeps longer follow-up chains
-        anchored to the last question that actually names a subject.
+        anchored to the last question that actually names a subject.  Used
+        only to build a deterministic fallback when the model rewrite is
+        unavailable.
         """
         current = question.strip()
         candidates: list[str] = []
@@ -833,7 +753,7 @@ class UniversityQASystem:
                 candidates.append(content)
 
         for content in candidates:
-            if not UniversityQASystem._is_unclear_question(content):
+            if UniversityQASystem._has_topic_words(content):
                 return content
         return candidates[0] if candidates else ""
 
@@ -848,46 +768,6 @@ class UniversityQASystem:
         """True when the question contains something more than generic
         follow-up phrasing ("what can you tell me about them")."""
         return bool(UniversityQASystem._content_words(question))
-
-    def _is_elided_subject_followup(
-        self, question: str, history: list[dict[str, str]]
-    ) -> bool:
-        """
-        True for a short predicate question whose subject was named only in
-        the previous turn ("Od kad radi sa studentima?" after "Od kada radi
-        studentska služba?").
-
-        The question passes the standalone heuristic (enough words, no
-        pronouns, no continuation prefix) but names no topic of its own:
-        every content word already appears in the previous question or the
-        last answer.  Retrieving it verbatim pulls in unrelated documents
-        that merely share words like "radi" or "studenti", so it is routed
-        through the rewrite, which fills in the elided subject.
-        """
-        if not history:
-            return False
-        if len(re.findall(r"\w+", question)) > _ELIDED_SUBJECT_MAX_WORDS:
-            return False
-        if not _ELIDED_SUBJECT_REGEX.search(question):
-            return False
-
-        words = self._content_words(question)
-        if not words:
-            return False
-
-        anchors = self._content_words(
-            self._previous_user_question(question, history)
-        )
-        for msg in reversed(history):
-            if msg.get("role") == "assistant":
-                anchors |= self._content_words(msg.get("content", ""))
-                break
-        if not anchors:
-            return False
-
-        return all(
-            any(_same_term(word, anchor) for anchor in anchors) for word in words
-        )
 
     def _rewrite_keeps_topic(
         self, rewritten: str, question: str, history: list[dict[str, str]]
@@ -980,44 +860,29 @@ class UniversityQASystem:
         text = UniversityQASystem._REWRITE_LABEL_RE.sub("", text, count=1)
         return text.strip().strip('"\'`“”„”«»')
 
-    def _has_resolvable_context(
-        self, question: str, history: list[dict[str, str]]
-    ) -> bool:
-        """
-        True when some previous turn can resolve an ambiguous question: a
-        previous user question, or an assistant answer that carries real
-        topic words.  Without either, the reference cannot be resolved and
-        the turn is answered with the fixed refusal instead of a guess.
-        """
-        if self._previous_user_question(question, history):
-            return True
-        return any(
-            msg.get("role") == "assistant"
-            and self._content_words(msg.get("content", ""))
-            for msg in history
-        )
-
     def _try_llm_rewrite(
         self, question: str, history: list[dict[str, str]]
     ) -> str | None:
         """
-        A single, bounded LLM call that rewrites the question into a
-        standalone query.  The model only sees its own most recent answer
-        plus the latest question.  Returns ``None`` when the call fails,
-        times out, echoes the input, has implausible length or drifts from
-        the conversation topic — the caller then uses the deterministic
+        Operation A: one bounded LLM call that decides whether the current
+        request can stand on its own and, when it cannot, rewrites it into
+        a standalone query using the previous conversation.
+
+        The model receives a bounded transcript of the conversation, so a
+        reference can be resolved against an entity named several turns
+        back.  Returns ``None`` when the call fails, times out, produces an
+        empty or implausibly long answer, or drifts away from the
+        conversation topic — the caller then uses the deterministic
         fallback instead.
         """
-        unclear = self._is_unclear_question(question)
-        last_answer = self._format_last_answer_for_rewrite(history)
-        if not last_answer:
+        history_text = self._format_history_for_rewrite(history)
+        if not history_text:
             return None
 
         try:
             rewritten = self.llm_manager.rewrite_query(
-                last_answer,
+                history_text,
                 question,
-                is_unclear=unclear,
                 timeout=self.rewrite_timeout,
             )
         except Exception:
@@ -1025,13 +890,10 @@ class UniversityQASystem:
             return None
 
         rewritten = self._clean_rewrite_output(rewritten or "")
-        if not rewritten or rewritten == question.strip():
-            logger.info("Rewrite empty or unchanged — using deterministic fallback")
+        if not rewritten:
+            logger.info("Rewrite unavailable — using deterministic fallback")
             return None
-        # A referential follow-up is short by nature ("šta još?"), but the
-        # standalone rewrite has to spell out the topic, so the upper bound
-        # gets a floor for unclear questions.
-        max_chars = max(len(question) * 5, 200) if unclear else len(question) * 5
+        max_chars = max(len(question) * 5, 200)
         if len(rewritten) < len(question) * 0.3 or len(rewritten) > max_chars:
             logger.warning(
                 "Rewrite length implausible (%d → %d chars) — using fallback",
@@ -1043,62 +905,40 @@ class UniversityQASystem:
             logger.warning("Rewrite drifted from the conversation topic")
             return None
 
-        logger.info("Query rewrite (unclear=%s): %r → %r", unclear, question, rewritten)
+        logger.info("Query rewrite: %r → %r", question, rewritten)
         return rewritten
 
     def _plan_query(
         self, question: str, history: list[dict[str, str]]
     ) -> _QueryPlan:
         """
-        Decision flow executed once per incoming question:
+        Decision flow executed once per incoming request.  It decides which
+        query is embedded, searched and finally put in front of the answer
+        model:
 
-        1. Standalone (cheap heuristic)      → embed the question as-is,
-           unless history turns it into a context-dependent follow-up: a
-           short predicate question whose subject was named only in the
-           previous turn ("Od kad radi sa studentima?") is resolved from
-           the previous turns instead.
-        2. Ambiguous / context-dependent     → resolve from previous turns:
-           a. no usable prior context        → unresolvable: skip retrieval
-              and generation, fixed refusal;
-           b. otherwise                      → one bounded LLM rewrite built
-              from the model's last answer only: referential words are
-              replaced with the entities it names, and a deterministic
-              fallback is used if the rewrite fails.
-        3. Short/vague but topical           → verbatim without history,
-              rewrite (as above) with history.
+        1. No conversation history → the request is standalone by
+           definition; it is searched as-is and no rewrite call is made.
+        2. History present → one semantic operation-A call receives the
+           bounded conversation and the current question and decides
+           whether the request is understandable on its own:
+             a. model returns the question unchanged → standalone;
+             b. model returns a self-contained rewrite → rewritten query;
+             c. call failed / output unusable      → deterministic fallback
+                built from the previous clear question.
+        The raw conversation history never reaches the answer model.
         """
-        if self._looks_standalone(question) and not self._is_elided_subject_followup(
-            question, history
-        ):
+        if not history:
+            logger.info("Request flow: no history — treating request as standalone")
             return _QueryPlan(question, "standalone")
 
-        unclear = self._is_unclear_question(question)
-
-        if unclear and not self._has_resolvable_context(question, history):
-            return _QueryPlan(None, "unresolvable")
-
-        if not unclear and not history:
-            # Clear, multi-word questions never reach this line — the
-            # _looks_standalone branch above already returns them as-is,
-            # with or without history.  Only short ("ESPB?") or
-            # continuation-prefixed ("A koliko ...") questions land here.
-            # Without history there is nothing to combine them with, so the
-            # original wording is the best available query.
-            return _QueryPlan(question, "verbatim")
-
-        # Ambiguous question with usable context: one bounded LLM rewrite.
-        # A purely referential follow-up ("šta možeš da mi kažeš o njima?")
-        # has no topic of its own, so the rewrite prompt replaces "njima"
-        # with the entities named in the model's last answer.  When the
-        # rewrite fails, times out or drifts, _context_fallback_query falls
-        # back to the previous clear question deterministically (or to the
-        # question itself).
+        logger.info("Request flow: history present — checking for follow-up")
         rewritten = self._try_llm_rewrite(question, history)
-        if rewritten:
-            return _QueryPlan(rewritten, "rewritten")
-        return _QueryPlan(
-            self._context_fallback_query(question, history), "fallback"
-        )
+        if rewritten is None:
+            fallback = self._context_fallback_query(question, history)
+            return _QueryPlan(fallback, "fallback")
+        if self._same_query(rewritten, question):
+            return _QueryPlan(question, "standalone")
+        return _QueryPlan(rewritten, "rewritten")
 
     def _standalone_question(
         self, question: str, history: list[dict[str, str]] | None = None
@@ -1107,55 +947,20 @@ class UniversityQASystem:
         Resolve the latest user question into a standalone retrieval query.
 
         Thin wrapper over :meth:`_plan_query` for callers that only need
-        the query text; questions the decision flow cannot resolve fall
-        back to the original wording.
+        the query text.
         """
-        plan = self._plan_query(question, history or [])
-        return plan.query if plan.query else question
-
-    # ------------------------------------------------------------------ #
-    #  Token-budget guard                                                  #
-    # ------------------------------------------------------------------ #
-
-    def _trim_history(
-        self,
-        history: list[dict[str, str]],
-        context: str,
-        question: str,
-        more_info: bool = False,
-    ) -> list[dict[str, str]]:
-        """
-        Ensure system_prompt + history + context + question fits inside
-        the configured num_ctx by keeping the newest turns that fit.
-
-        Messages that individually exceed the remaining budget are skipped
-        rather than causing all older messages to be dropped.
-        """
-        system_tokens = _estimate_tokens(self.SYSTEM_PROMPT)
-        # Account for the wrapping text added by _build_user_content
-        user_wrapper = self._build_user_content(context, question, more_info)
-        user_tokens = _estimate_tokens(user_wrapper)
-        budget = int(self.num_ctx * 0.8) - system_tokens - user_tokens
-
-        trimmed: list[dict[str, str]] = []
-        for msg in reversed(history):
-            msg_tokens = _estimate_tokens(msg.get("content", ""))
-            if msg_tokens <= budget:
-                trimmed.insert(0, msg)
-                budget -= msg_tokens
-        return trimmed
+        return self._plan_query(question, history or []).query
 
     # ------------------------------------------------------------------ #
     #  Message list builder                                                #
     # ------------------------------------------------------------------ #
 
     # Fixed instruction appended to the user prompt when the question asks
-    # for additional information about the previous answer.
+    # for additional information (retrieval already replaced the previously
+    # used chunks with fresh ones).
     _MORE_INFO_NOTE = (
-        "NAPOMENA: Korisnik traži dodatne informacije o prethodnom "
-        "odgovoru. Nemojte ponavljati ono što je već rečeno — iz konteksta "
-        "iznesite nove činjenice, liste ili detalje koji nisu pomenuti u "
-        "prethodnom odgovoru, i za svaku navedite [Izvor N]."
+        "NAPOMENA: Korisnik traži dodatne informacije. Iz konteksta iznesite "
+        "konkretne činjenice, liste ili detalje i za svaku navedite [Izvor N]."
     )
 
     def _build_user_content(
@@ -1198,9 +1003,9 @@ class UniversityQASystem:
 
     def _retrieve(
         self,
-        question: str,
-        history: list[dict[str, str]],
+        plan: _QueryPlan,
         k: int | None = None,
+        more_info: bool = False,
         exclude_chunk_ids: list[str] | None = None,
     ) -> list[RetrievedChunk]:
         """
@@ -1212,18 +1017,14 @@ class UniversityQASystem:
         the previous answer, so the model gets genuinely new material to
         expand on instead of the same top-k chunks.
 
-        Unresolvable questions return ``[]`` without touching the vector
-        store or the LLM; the caller answers with the fixed refusal.
+        The query is the standalone one chosen by ``_plan_query``.  The
+        existing retriever (dense similarity threshold, hybrid/RRF fusion
+        and optional cross-encoder rerank) is the chunk-selection stage, so
+        unrelated chunks are not blindly handed to the answer model.
         """
         k = k or self.default_k
-        more_info = bool(history) and self._is_more_info_followup(question)
         search_k = max(k, self.more_info_k) if more_info else k
         exclude = set(exclude_chunk_ids or [])
-
-        plan = self._plan_query(question, history)
-        if plan.query is None:
-            logger.info("Unresolvable question — skipping retrieval (%s)", plan.reason)
-            return []
 
         chunks = self._search(plan.query, search_k)
 
@@ -1253,29 +1054,6 @@ class UniversityQASystem:
     #  Prompt preparation                                                  #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _strip_history_citations(
-        history: list[dict[str, str]],
-    ) -> list[dict[str, str]]:
-        """
-        Remove ``[Izvor N]`` markers from history messages before they are
-        fed back to the LLM.
-
-        Citation numbers are re-assigned per turn by the registry, so a
-        marker kept from an older answer would point at a different source
-        in the new context.  The facts stay; only the stale numbers go.
-        """
-        clean: list[dict[str, str]] = []
-        for msg in history:
-            content = _CITATION_REGEX.sub("", msg.get("content", ""))
-            clean.append(
-                {
-                    "role": msg.get("role", "user"),
-                    "content": _clean_spacing(content).strip(),
-                }
-            )
-        return clean
-
     def _prepare(
         self,
         question: str,
@@ -1283,8 +1061,32 @@ class UniversityQASystem:
         k: int | None = None,
         exclude_chunk_ids: list[str] | None = None,
     ) -> tuple[CitationRegistry, list[dict[str, str]], list[RetrievedChunk]]:
+        """
+        Resolve the question, retrieve this turn's chunks and build the
+        prompt.
+
+        The prompt is always exactly two messages — the system prompt and
+        one user message holding the retrieved context plus the *resolved*
+        question.  Previous turns are deliberately not included: history is
+        used only to rewrite an ambiguous question into a standalone one, so
+        the model answers the current topic without mixing in earlier
+        conversations' facts.  The decision flow runs once here and its
+        query is shared by retrieval and the prompt.
+        """
+        plan = self._plan_query(question, history)
+        more_info = bool(history) and self._is_more_info_followup(question)
+        logger.info(
+            "Query plan: original=%r follow_up=%s reason=%s search_query=%r",
+            question,
+            plan.reason != "standalone",
+            plan.reason,
+            plan.query,
+        )
         chunks = self._retrieve(
-            question, history, k=k, exclude_chunk_ids=exclude_chunk_ids
+            plan,
+            k=k,
+            more_info=more_info,
+            exclude_chunk_ids=exclude_chunk_ids,
         )
         registry = CitationRegistry()
         for chunk in chunks:
@@ -1293,20 +1095,16 @@ class UniversityQASystem:
         if not chunks:
             return registry, [], []
 
-        more_info = bool(history) and self._is_more_info_followup(question) # why we have thsi condition here? if we have a logic in retrieve section about unclear qeuestions!
         context = self._build_context(chunks, registry)
-        trimmed = self._trim_history(history, context, question, more_info)
-
         messages: list[dict[str, str]] = [
             {"role": "system", "content": self.SYSTEM_PROMPT},
-        ]
-        messages.extend(self._strip_history_citations(trimmed))
-        messages.append(
             {
                 "role": "user",
-                "content": self._build_user_content(context, question, more_info),
-            }
-        )
+                "content": self._build_user_content(
+                    context, plan.query, more_info
+                ),
+            },
+        ]
         return registry, messages, chunks
 
     # ------------------------------------------------------------------ #

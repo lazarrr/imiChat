@@ -95,8 +95,8 @@ def test_rewrite_is_cached_for_identical_history_and_question():
     history = "Korisnik: Koliko ima smerova?\nAsistent: Dva."
     question = "Šta možeš o njima?"
 
-    first = manager.rewrite_query(history, question, is_unclear=True)
-    second = manager.rewrite_query(history, question, is_unclear=True)
+    first = manager.rewrite_query(history, question)
+    second = manager.rewrite_query(history, question)
 
     assert first == second == "Koji su smerovi na OAS informatici?"
     assert len(manager._client.calls) == 1
@@ -106,8 +106,8 @@ def test_rewrite_cache_distinguishes_questions():
     manager = _manager(["Prvi upit", "Drugi upit"])
     history = "Korisnik: Pitanje\nAsistent: Odgovor."
 
-    assert manager.rewrite_query(history, "Pitanje jedan?", is_unclear=True) == "Prvi upit"
-    assert manager.rewrite_query(history, "Pitanje dva?", is_unclear=True) == "Drugi upit"
+    assert manager.rewrite_query(history, "Pitanje jedan?") == "Prvi upit"
+    assert manager.rewrite_query(history, "Pitanje dva?") == "Drugi upit"
     assert len(manager._client.calls) == 2
 
 
@@ -115,35 +115,32 @@ def test_rewrite_uses_fixed_seed_and_greedy_decoding():
     manager = _manager(["Prepisano pitanje?"])
     history = "Korisnik: Pitanje\nAsistent: Odgovor."
 
-    manager.rewrite_query(history, "Šta o njima?", is_unclear=True)
+    manager.rewrite_query(history, "Šta o njima?")
 
     options = manager._client.calls[0]["options"]
     assert options["temperature"] == 0.0
     assert options["seed"] == 7
 
 
-def test_rewrite_prompt_forbids_swapping_a_newly_named_topic():
+def test_rewrite_prompt_asks_for_semantic_followup_decision_and_keeps_topic():
     manager = _manager(["Koliko modula ima na informatici?"])
-    history = "Matematika ima tri modula: Analiza, Algebra i Geometrija."
+    history = (
+        "Korisnik: Koliko ima modula na matematici?\n"
+        "Asistent: Matematika ima tri modula: Analiza, Algebra i Geometrija."
+    )
 
-    manager.rewrite_query(history, "A koliko ima na informatici?", is_unclear=False)
+    manager.rewrite_query(history, "A koliko ima na informatici?")
 
     prompt = manager._client.calls[0]["prompt"]
-    assert "ne zamenjuj je temom iz prethodnog odgovora" in prompt
-    assert "a koliko ima na informatici" in prompt
+    # The full transcript (both roles, several turns) is given to the model.
+    assert "Korisnik: Koliko ima modula na matematici?" in prompt
+    assert "Asistent: Matematika ima tri modula" in prompt
+    # The model must decide whether a rewrite is needed at all …
+    assert "vrati ga NEPROMENJENO" in prompt
+    # … and must preserve a topic the latest question names itself.
+    assert "Sacuvaj temu koju najnovije pitanje samo imenuje" in prompt
+    assert "A koliko ima na informatici?" in prompt
     assert "Koliko modula ima na informatici?" in prompt
-    assert "Od kada studentska sluzba radi sa studentima?" in prompt
-
-
-def test_unclear_rewrite_prompt_also_keeps_a_newly_named_topic():
-    manager = _manager(["Koliko modula ima na informatici?"])
-    history = "Matematika ima tri modula."
-
-    manager.rewrite_query(history, "A koliko ima na informatici?", is_unclear=True)
-
-    prompt = manager._client.calls[0]["prompt"]
-    assert "imenuje DRUGU temu" in prompt
-    assert "ne zamenjuj je temom iz prethodnog" in prompt
 
 
 def test_rewrite_without_history_returns_question_unchanged():
@@ -151,6 +148,12 @@ def test_rewrite_without_history_returns_question_unchanged():
 
     assert manager.rewrite_query("   ", "Pitanje?") == "Pitanje?"
     assert manager._client.calls == []
+
+
+def test_rewrite_nonsense_response_yields_empty_fallback_signal():
+    manager = _manager(["x"])
+
+    assert manager.rewrite_query("Korisnik: Pitanje", "Pitanje?") == ""
 
 
 def test_local_backend_used_when_configured():
@@ -216,7 +219,7 @@ def test_remote_generate_maps_rewrite_seed():
     manager._client._session = _FakeSession(response)
     history = "Korisnik: Pitanje\nAsistent: Odgovor."
 
-    manager.rewrite_query(history, "Šta o njima?", is_unclear=True)
+    manager.rewrite_query(history, "Šta o njima?")
 
     payload = manager._client._session.calls[0]["json"]
     assert payload["seed"] == 7

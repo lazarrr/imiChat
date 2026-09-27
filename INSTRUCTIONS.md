@@ -154,8 +154,10 @@ python -m src.api.main  # FastAPI server (multi-turn with sessions)
 
 ### CLI mode (`run.py`)
 
-Simple REPL loop.  Type questions, get answers + sources.  **No multi-turn
-memory** — each question is independent.
+Simple REPL loop.  Type questions, get answers + sources.  The turns are
+kept only to resolve follow-ups (e.g. `"Koji su preduslovi za njega?"`);
+the model always answers from the current question and the retrieved
+chunks, never from the conversation history.
 
 ```
 Pitanje (ili 'kraj'): Koliko ESPB ima Uvod u programiranje?
@@ -229,32 +231,34 @@ curl -X POST http://localhost:8000/chat/stream \
 ```
 
 **What the chatbot does internally on turn 2:**
-1. Detects this is a follow-up (session `abc123` has history).
-2. Skips the LLM rewrite if a heuristic already considers the question
-   standalone. A short predicate follow-up that names no topic of its own
-   ("Od kad radi sa studentima?" after "Od kada radi studentska služba?")
-   is not considered standalone: its elided subject is filled in by the
-   rewrite from the previous answer. Referential follow-ups
-   (`"Šta možeš o njima?"`) and other context-dependent questions are
-   rewritten by Llama 3.1 (bounded by a timeout, temperature 0, fixed
-   seed) using the model's previous *answer* and the latest question;
-   successful rewrites are cached by `(history, question)` so they are
-   reproducible. A rewrite that drifts from the conversation topic, or
-   that swaps the topic explicitly named in the latest question for the
-   one from the previous answer, is rejected. On failure, timeout or
-   rejection a deterministic fallback retrieves with the previous clear
-   question (plus the new one when it has its own topic).
-3. Embeds the **rewritten** question (with `query: ` prefix) and retrieves
+1. Loads the session history and asks the model (operation A) to decide
+   whether the new request is understandable on its own. The model
+   receives a bounded transcript of the whole recent conversation — not
+   just the last answer — and returns the question unchanged when it is
+   already self-contained, otherwise a standalone rewrite that resolves
+   references such as "njega", "njen" or "više o njima". The call is
+   bounded by a timeout, temperature 0 and a fixed seed; successful
+   rewrites are cached by `(history, question)` so they are reproducible.
+   A rewrite that drifts from the conversation topic, or that swaps the
+   topic explicitly named in the latest question for the one from the
+   previous answer, is rejected. On failure, timeout or rejection a
+   deterministic fallback retrieves with the previous clear question
+   (plus the new one when it has its own topic).
+2. Embeds the **standalone** query (with `query: ` prefix) and retrieves
    relevant chunks with hybrid dense (E5) + BM25 search, fused by
-   Reciprocal Rank Fusion. If that returns nothing, the original question
-   is retried verbatim (no other fallbacks).
-4. Sends the full message list (system prompt + history + new
-   context-augmented question) to the configured LLM backend (local
-   Ollama `/api/chat` or remote `/v1/chat/completions`).
-5. Streams the answer token-by-token with `[Izvor N]` markers removed
+   Reciprocal Rank Fusion. The vector store's similarity threshold, the
+   fusion/rerank stages and de-duplication are the chunk-selection stage:
+   only the chunks that survive them reach the prompt. If retrieval
+   returns nothing, the turn is answered with the fixed refusal.
+3. Sends only two messages to the configured LLM backend (local Ollama
+   `/api/chat` or remote `/v1/chat/completions`): the system prompt and the
+   context-augmented **resolved (standalone) question**. Previous turns are
+   never part of the prompt, so answers stay on the current topic; history
+   is only used to resolve the follow-up.
+4. Streams the answer token-by-token with `[Izvor N]` markers removed
    (records them internally) and emits a structured `sources` event with
    only the sources actually cited; refusals carry no sources.
-6. Saves both the original question and answer to the session history.
+5. Saves both the original question and answer to the session history.
 
 Sessions expire after **1 hour** of inactivity.
 
@@ -318,11 +322,9 @@ Omitting these prefixes **degrades retrieval quality significantly**.
 
 ### Multi-turn conversation (v2)
 
-Three fixes were applied to enable proper multi-turn conversations:
-
-1. **Full history sent to LLM** — every turn sends `[system, user1, assistant1, user2, ...]` via `/api/chat`.
-2. **Query contextualization** — follow-up questions are rewritten into standalone form before embedding (e.g. `"Koliko ESPB ima?"` → `"Koliko ESPB ima Uvod u programiranje?"`).
-3. **Context window guard** — `num_ctx=8192` is set explicitly; oldest history turns are trimmed if the budget is exceeded.
+1. **History only for query resolution** — a session keeps its turns, but they are used only to decide whether the request is a follow-up and to rewrite it into a standalone question. The LLM prompt itself is always exactly `[system, resolved question + retrieved context]`; previous turns are never sent, so answers cannot mix in earlier topics.
+2. **Semantic follow-up detection** — no keyword/pronoun list decides this; when history exists, one bounded model call receives the recent conversation transcript and either returns the question unchanged (standalone) or rewrites it (e.g. `"Gde je njen kabinet?"` → `"Gde se nalazi kabinet profesorke Višnje?"`). Unchanged output means the original wording is searched; rewrite failures fall back deterministically.
+3. **Bounded context** — `num_ctx=8192` is set explicitly and the retrieved context is capped per chunk and in total, so a single turn can never overflow the window.
 
 ### Citations
 

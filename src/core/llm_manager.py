@@ -221,10 +221,8 @@ class LLMManager:
     # ------------------------------------------------------------------ #
 
     @staticmethod
-    def _rewrite_cache_key(
-        history_text: str, latest_question: str, is_unclear: bool
-    ) -> str:
-        payload = f"{int(is_unclear)}\n{latest_question.strip()}\n{history_text}"
+    def _rewrite_cache_key(history_text: str, latest_question: str) -> str:
+        payload = f"{latest_question.strip()}\n{history_text}"
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _rewrite_cache_get(self, key: str) -> str | None:
@@ -324,30 +322,29 @@ class LLMManager:
         self,
         history_text: str,
         latest_question: str,
-        is_unclear: bool = False,
         timeout: float | None = None,
     ) -> str:
         """
-        Rewrite a follow-up question into a standalone question using the
-        model's most recent answer.
+        Operation A: decide whether the latest request can stand on its own
+        and, when it cannot, rewrite it into a standalone question using the
+        previous conversation.
 
-        Uses a short /api/generate call with a small token budget so it's
-        near-instant once the model is warm.
+        ``history_text`` is a compact transcript of the conversation (both
+        roles), so a reference can be resolved against an entity named
+        several turns back.  The model returns the question unchanged when
+        it is already self-contained; otherwise it returns a rewrite that
+        spells out the referenced entities.  It never returns an answer —
+        the prompt forbids answering and the QA chain validates the output
+        before using it.
 
-        Only the previous *answer* is given to the model (``history_text``):
-        it names the entities a referential follow-up ("what can you tell me
-        about them?") points to.  The prompt demands that the rewritten
-        question names its topic explicitly, otherwise it is not standalone.
-        It also forbids swapping a topic the latest question names itself
-        ("a koliko ima na informatici" after an answer about matematika)
-        for the topic of the previous answer.
+        The call is deterministic: temperature 0, a fixed seed, and a cache
+        keyed by (transcript, question), so the same conversation state
+        always yields the same query.  A short /api/generate call with a
+        small token budget keeps it fast once the model is warm.
 
-        Rewrites are deterministic: temperature is 0, a fixed seed is set,
-        and the successful result is cached by (context, question, unclear),
-        so the same conversation state always yields the same query.
-
-        ``timeout`` caps how long the caller waits; on timeout the original
-        question is returned so the QA chain can apply its own fallback.
+        ``timeout`` caps how long the caller waits.  On timeout or any other
+        failure an empty string is returned, which tells the QA chain to use
+        its deterministic fallback instead of guessing.
 
         The prompt is in Serbian because both the documents and the
         conversation are in Serbian (Latin script).
@@ -355,74 +352,41 @@ class LLMManager:
         if not history_text.strip():
             return latest_question
 
-        if is_unclear:
-            reference_rule = (
-                "Najnovije pitanje je NEJASNO i oslanja se na prethodni "
-                "razgovor (na primer: 'daj mi vise informacija o njima', "
-                "'sta je sa tim', 'pojasni').\n"
-                "1. Zameni nejasne reci (npr. 'njima', 'to', 'tim') konkretnim "
-                "pojmovima iz prethodnog ODGOVORA asistenta (nazivi smerova, "
-                "modula, predmeta, programa).\n"
-                "2. Ako najnovije pitanje ipak imenuje DRUGU temu od prethodnog "
-                "odgovora (npr. drugi smer, modul, predmet ili program), tu "
-                "temu OBAVEZNO zadrzi i ne zamenjuj je temom iz prethodnog "
-                "odgovora. Iz prethodnog odgovora preuzmi samo ono sto u "
-                "najnovijem pitanju nedostaje.\n"
-                "3. Prepisano pitanje mora jasno da imenuje temu o kojoj se "
-                "govori (npr. naziv programa, smera, modula ili predmeta), "
-                "koristeci pojmove iz prethodnog ODGOVORA i najnovijeg "
-                "pitanja — bez toga pitanje nije samostalno.\n"
-                "4. Ako najnovije pitanje trazi DODATNE informacije o necemu "
-                "iz prethodnog odgovora, prepisi ga tako da jasno imenuje "
-                "temu o kojoj se traze dodatne informacije, ali NE dodaj "
-                "nove cinjenice.\n"
-                "5. Ne izmisljaj pojmove kojih nema u istoriji razgovora.\n"
-                "6. Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
-            )
-        else:
-            reference_rule = (
-                "Ako se najnovije pitanje odnosi na nesto iz prethodnog "
-                "ODGOVORA asistenta, razresi to pomocu tog odgovora i sacuvaj "
-                "temu najnovijeg pitanja.\n"
-                "1. Ako najnovije pitanje imenuje DRUGU temu od prethodnog "
-                "odgovora (npr. drugi smer, modul, predmet ili program), tu "
-                "temu OBAVEZNO zadrzi i ne zamenjuj je temom iz prethodnog "
-                "odgovora. Iz prethodnog odgovora preuzmi samo ono sto u "
-                "najnovijem pitanju nedostaje (npr. predmet ili radnju), "
-                "a ne i temu.\n"
-                "2. Ako najnovije pitanje pita o svojstvu (npr. radnom "
-                "vremenu ili nacinu rada) entiteta iz prethodnog odgovora, "
-                "prepisi ga tako da jasno imenuje taj entitet.\n"
-                "3. Ne izmisljaj pojmove kojih nema u istoriji razgovora.\n"
-                "4. Vrati iskljucivo prepisano pitanje, bez objasnjenja.\n\n"
-            )
-
-        examples = (
-            "Primeri:\n"
-            "- Prethodni odgovor govori o modulima na matematici, a najnovije "
-            "pitanje je 'a koliko ima na informatici'. Ispravno: 'Koliko "
-            "modula ima na informatici?'. Neispravno: 'Koliko modula ima na "
-            "matematici?'.\n"
-            "- Prethodni odgovor govori o radnom vremenu studentske sluzbe, "
-            "a najnovije pitanje je 'od kad radi sa studentima'. Ispravno: "
-            "'Od kada studentska sluzba radi sa studentima?'.\n\n"
-        )
-
         prompt = (
-            "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
-            "ono postane potpuno samostalno — tako da neko ko ne vidi istoriju "
-            "razgovora moze da razume na sta se pitanje odnosi.\n\n"
-            "Prethodni odgovor asistenta:\n"
+            "Tvoj zadatak je da odlucis da li najnovije korisnicko pitanje "
+            "moze da se razume bez prethodnog razgovora i, ako ne moze, da ga "
+            "prepises u samostalno pitanje.\n\n"
+            "Prethodni razgovor:\n"
             f"{history_text}\n\n"
             "Najnovije pitanje: "
             f"{latest_question}\n\n"
             "Pravila:\n"
-            + reference_rule
-            + examples)
-
-        cache_key = self._rewrite_cache_key(
-            history_text, latest_question, is_unclear
+            "1. Ako najnovije pitanje moze potpuno da se razume samo po sebi, "
+            "vrati ga NEPROMENJENO.\n"
+            "2. Ako zavisi od prethodnog razgovora (sadrzi zamenice kao 'on', "
+            "'njima', 'njen', 'to', ili trazi dodatne informacije o ranije "
+            "pomenutoj temi, ili mu nedostaje tema), prepisi ga u JEDNO "
+            "samostalno pitanje koje sadrzi sve potrebne pojmove iz razgovora.\n"
+            "3. Razresi svaku referencu konkretnim pojmom iz razgovora (naziv "
+            "programa, smera, modula, predmeta ili osobe).\n"
+            "4. Sacuvaj temu koju najnovije pitanje samo imenuje; iz razgovora "
+            "preuzmi samo ono sto u njemu nedostaje.\n"
+            "5. Ne odgovaraj na pitanje, ne dodaj cinjenice kojih nema u "
+            "razgovoru i ne izmisljaj pojmove.\n"
+            "6. Vrati iskljucivo jedno pitanje, bez objasnjenja, oznaka i "
+            "navodnika.\n\n"
+            "Primeri:\n"
+            "- Razgovor: 'Koliko modula ima na matematici?' / 'Matematika ima "
+            "tri modula: Analizu, Algebru i Geometriju.'; pitanje: 'A koliko "
+            "ih ima na informatici?' -> 'Koliko modula ima na informatici?'\n"
+            "- Razgovor: 'Od kada radi studentska sluzba?' / 'Studentska "
+            "sluzba radi od 9 do 15.'; pitanje: 'A od kad radi sa "
+            "studentima?' -> 'Od kada studentska sluzba radi sa studentima?'\n"
+            "- Pitanje: 'Koji su uslovi za upis na master studije?' (bez "
+            "zavisnosti od razgovora) -> ostaje nepromenjeno."
         )
+
+        cache_key = self._rewrite_cache_key(history_text, latest_question)
         cached = self._rewrite_cache_get(cache_key)
         if cached is not None:
             logger.info(
@@ -437,7 +401,7 @@ class LLMManager:
                 options={
                     "temperature": 0.0,
                     "num_predict": 128,
-                    "num_ctx": 2048,
+                    "num_ctx": 4096,
                     "seed": self.rewrite_seed,
                 },
                 stream=False,
@@ -452,18 +416,19 @@ class LLMManager:
                 result = future.result(timeout=timeout)
             except FutureTimeoutError:
                 logger.warning(
-                    "Query rewrite timed out after %.1fs — using original question",
+                    "Query rewrite timed out after %.1fs — using fallback",
                     timeout,
                 )
                 future.cancel()
-                return latest_question
+                return ""
             except Exception:
-                logger.exception("Query rewrite failed — using original question")
-                return latest_question
+                logger.exception("Query rewrite failed — using fallback")
+                return ""
 
         result = (result or "").strip()
-        # Guard: if the model returned something nonsensical, fall back
+        # Guard: if the model returned something nonsensical, let the QA
+        # chain apply its deterministic fallback.
         if not result or len(result) < 3:
-            return latest_question
+            return ""
         self._rewrite_cache_put(cache_key, result)
         return result
