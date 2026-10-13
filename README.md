@@ -126,8 +126,13 @@ curl -X POST http://localhost:8000/chat/stream \
   -d '{"question":"Koji su preduslovi za njega?","session_id":"abc123"}'
 ```
 
-On turn 2 the chatbot rewrites the follow-up into a standalone question
-(e.g. `"Koji su preduslovi za Uvod u programiranje?"`) before retrieving.
+On turn 2 the chatbot spots the reference word (`njega`) and rewrites the
+follow-up into a standalone question (e.g. `"Koji su preduslovi za Uvod u
+programiranje?"`). That rewritten question is used for retrieval and is the
+only question the LLM sees, together with the retrieved chunks. The
+conversation history itself is never sent to the LLM; it is kept only for
+these rewrites. Questions without such a reference are searched and
+answered exactly as typed.
 
 ## Configuration
 
@@ -141,13 +146,17 @@ environment variables or a `.env` file (see `.env.example`).
 | `LLM_MAX_TOKENS` | `2048` | Max response length |
 | `LLM_NUM_CTX` | `8192` | Context window (tokens) |
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large` | Embedding model |
-| `VECTOR_DB_PATH` | `./data/vector_store` | Shared ChromaDB path |
+| `VECTOR_DB_PATH` | `./data/vector_store` | Shared ChromaDB path (filled by the scraper project) |
+| `CHROMA_COLLECTION` | `university_knowledge` | Collection to read (e.g. `university_knowledge_test`) |
+| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before legacy versions / duplicates are dropped |
 | `CHUNK_SIZE` | `1000` | Characters per chunk |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `DEFAULT_SCRIPT` | `latinc` | `latinc` or `cyrillic` |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API server |
+| `RATE_LIMIT` | `100` | `/chat` requests per minute per client IP (`0` = no limit); HTTP 429 above it |
+| `REDIS_URL` | *(unset)* | Optional, e.g. `redis://localhost:6379/0` — sessions and rate limits shared by all workers and kept across restarts (otherwise in memory) |
 
 ## Project structure
 
@@ -158,7 +167,9 @@ environment variables or a `.env` file (see `.env.example`).
 ├── run.py                     # CLI entry point
 ├── src/
 │   ├── api/
-│   │   └── main.py            # FastAPI server + session management
+│   │   ├── main.py            # FastAPI server (routes, wiring)
+│   │   ├── sessions.py        # Session history (memory or Redis)
+│   │   └── middleware.py      # Rate limiting (RATE_LIMIT per client IP)
 │   ├── core/
 │   │   ├── llm_manager.py     # Ollama wrappers (/api/chat & /api/generate)
 │   │   ├── embeddings.py      # Embedding utilities

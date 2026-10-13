@@ -7,7 +7,7 @@ university, split into two projects that share a single ChromaDB vector store:
 
 | Project | What it does |
 |---|---|
-| `university-scraper` | Crawls the university website, extracts text from HTML/PDF/DOCX, chunks, embeds, and upserts into ChromaDB. |
+| `scraper` (C:\Projects\scraper) | Crawls the links listed in `links.txt`, parses HTML (incl. every tab panel) / PDF / DOCX, labels each chunk with its location and study-program version, validates + enriches it with DeepSeek, embeds, and writes to ChromaDB. |
 | `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Llama 3.1 8B (Ollama). |
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
@@ -74,8 +74,9 @@ via environment variables or a `.env` file.
 | Variable | Default | Notes |
 |---|---|---|
 | `VECTOR_DB_PATH` | `./data/vector_store` | Absolute path recommended if projects live in different folders |
-| `CHUNK_SIZE` | `1000` | Characters per chunk |
-| `CHUNK_OVERLAP` | `200` | Overlap between chunks |
+| `CHROMA_COLLECTION` | `university_knowledge` | Point both at e.g. `university_knowledge_test` to try a test ingest |
+| `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large` | Must be identical |
+| `chromadb` version | `1.5.9` | Pinned in both `requirements.txt` files |
 
 ### Chatbot-specific (`.env` in `university-chatbot/`)
 
@@ -87,44 +88,61 @@ via environment variables or a `.env` file.
 | `LLM_NUM_CTX` | `8192` | Context window (tokens) |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
+| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy drops legacy / duplicate chunks |
 | `API_HOST` | `0.0.0.0` | |
 | `API_PORT` | `8000` | |
+| `RATE_LIMIT` | `100` | `/chat` requests per minute per client IP (`0` = no limit); HTTP 429 above it |
+| `REDIS_URL` | *(unset)* | Optional, e.g. `redis://localhost:6379/0` — sessions and rate limits shared by all workers and kept across restarts (otherwise in memory) |
 
-### Scraper-specific (`.env` in `university-scraper/`)
+### Scraper-specific (`.env` in `C:\Projects\scraper`)
 
 | Variable | Default | Notes |
 |---|---|---|
-| `CRAWLER_MAX_DEPTH` | `1` | How deep to follow links |
-| `CRAWLER_DELAY` | `1.0` | Seconds between requests |
-| `CRAWLER_INCLUDE_PATTERNS` | `[...]` | URL paths to include |
-| `CRAWL_HISTORY_ENABLED` | `True` | Skip already-scraped URLs |
+| `DEEPSEEK_API_KEY` | – | Required unless `--no-llm` |
+| `DEEPSEEK_MODEL` | `deepseek-flash` | DeepSeek-V4.1-Flash |
+| `CRAWL_DELAY` | `1.0` | Seconds between requests |
+| `CRAWL_DOC_PATTERNS` | `["/pub/"]` | Which linked PDFs `docs=true` follows |
+| `CHUNK_MAX_TOKENS` | `300` | E5 tokens per chunk (E5 reads at most 512) |
 
 ---
 
 ## 4. Running the scraper (populate the vector store)
 
 Run this **first** — it populates the shared ChromaDB store that the
-chatbot reads from.
+chatbot reads from.  **Stop the chatbot while ingesting and restart it
+afterwards** — Chroma's local mode is not multi-process safe and every
+process keeps the index in memory.
 
 ```bash
-conda activate uni
-cd university-scraper
-python run.py
+cd C:\Projects\scraper
+python run.py ingest --links links.test.txt --dry-run      # try it: report only, nothing written
+python run.py ingest --links links.test.txt --collection university_knowledge_test
+python run.py search "Koliko modula ima informatika?" --collection university_knowledge_test
+python run.py ingest                                         # everything in links.txt
 ```
 
 What happens:
-1. Crawls `https://imi.pmf.kg.ac.rs/` (breadth-first, respects `robots.txt`).
-2. Extracts clean text from HTML, PDF, and DOCX resources.
-3. Chunks text (1000 chars, 200 overlap).
-4. Embeds with `intfloat/multilingual-e5-large` (using `passage: ` prefix).
-5. Upserts into ChromaDB collection `university_knowledge`.
-6. Records ingested URLs in `data/crawl_history.json` → subsequent runs skip them.
+1. Fetches **only the links listed in `links.txt`** (`| depth=N` / `| docs=true` per line to follow links; robots.txt + 1 s delay).
+2. Parses every tab panel of a page as its own section with a breadcrumb
+   (e.g. `Informatika › Osnovne (Upis 2026/27) › Računarske nauke`);
+   panels no visitor can open are skipped; course tables keep their columns.
+3. Labels each section with its study-program version from `programs.yaml`
+   (accreditation year + status `enrolling | phase_out | upcoming | legacy`).
+   DeepSeek drafts entries for unknown panels into `programs.draft.yaml` for review.
+4. DeepSeek (`deepseek-flash`) adds page type / summary / date and, per chunk,
+   context, likely questions, keywords and a quality flag; boilerplate is dropped.
+5. Adds a generated, verified "Pregled verzija" chunk per program
+   (e.g. 2026: 2 modula … 2019: 3 modula …).
+6. Embeds with `intfloat/multilingual-e5-large` (`passage: ` prefix) and writes
+   to the collection: upsert, then delete that page's stale chunks.
+7. Writes `data/reports/<time>/report.md` — read it after every run.
 
-Set `CRAWL_HISTORY_ENABLED=false` to force a full re-crawl.
+Unchanged pages are skipped on the next run (`--force` re-processes them).
+`python run.py remove <url>` deletes a page's chunks.
 
 > **The persist directory** (`data/vector_store/`) is shared between
-> projects.  A `shared_config.json` is written there on first run to
-> keep both projects in sync.
+> projects.  The scraper writes a `shared_config.json` there recording
+> the embedding model and prefixes.
 
 ---
 
@@ -133,15 +151,16 @@ Set `CRAWL_HISTORY_ENABLED=false` to force a full re-crawl.
 ```bash
 conda activate uni
 cd university-chatbot
-python run.py          # CLI interactive mode (single-turn, no session)
+python run.py          # CLI interactive mode (follow-ups work; 'novo' resets)
 # OR
 python -m src.api.main  # FastAPI server (multi-turn with sessions)
 ```
 
 ### CLI mode (`run.py`)
 
-Simple REPL loop.  Type questions, get answers + sources.  **No multi-turn
-memory** — each question is independent.
+Simple REPL loop.  Type questions, get answers + sources.  The conversation
+history is kept so that follow-ups like "a o njima?" can be rewritten (see
+§8); type `novo` to start a new conversation, `kraj` to exit.
 
 ```
 Pitanje (ili 'kraj'): Koliko ESPB ima Uvod u programiranje?
@@ -205,44 +224,45 @@ curl -X POST http://localhost:8000/chat/stream \
 ```
 
 **What the chatbot does internally on turn 2:**
-1. Detects this is a follow-up (session `abc123` has history).
+1. Detects an unclear follow-up: the question contains a reference word
+   (`njega`) and session `abc123` has history.
 2. Calls Llama 3.1 to rewrite `"Koji su preduslovi za njega?"` →
    `"Koji su preduslovi za Uvod u programiranje?"`.
 3. Embeds the **rewritten** question (with `query: ` prefix) and
    retrieves relevant chunks from ChromaDB.
-4. Sends the full message list (system prompt + history + new
-   context-augmented question) to Ollama `/api/chat`.
+4. Sends **only** the system prompt + retrieved chunks + rewritten question
+   to Ollama `/api/chat` — the conversation history is not sent.
 5. Streams the answer token-by-token + appends `--- Izvori:` block.
 6. Saves both the original question and answer to the session history.
 
-Sessions expire after **1 hour** of inactivity.
+Sessions expire after **1 hour** of inactivity.  They are kept in the
+server's memory (lost on restart) unless `REDIS_URL` is set — then they live
+in Redis and are shared by all API workers.  `/chat/stream` accepts at most
+`RATE_LIMIT` requests per minute per client IP and answers HTTP 429 above
+that.
 
 ---
 
 ## 7. Project structure
 
 ```
-master/
-├── university-scraper/          # Scraper & embedding project
-│   ├── config/settings.py       # Scraper config
-│   ├── run.py                   # Entry point
-│   ├── src/
-│   │   ├── core/vector_store.py # ChromaDB wrapper (E5 prefixes)
-│   │   └── processing/
-│   │       ├── crawler.py       # Domain crawler
-│   │       ├── extractor.py     # HTML/PDF/DOCX extraction
-│   │       ├── ingest.py        # Crawl → Extract → Chunk → Embed pipeline
-│   │       └── crawl_history.py # Already-ingested URL tracker
-│   └── data/
-│       ├── raw/                 # (optional) local files to ingest
-│       ├── processed/
-│       └── vector_store/        # ← SHARED ChromaDB persist directory
+C:\Projects\
+├── scraper/                     # Scraper & embedding project (see its README.md)
+│   ├── links.txt                # ← what to crawl (one URL / local PDF per line)
+│   ├── programs.yaml            # ← reviewed study-program versions (authoritative)
+│   ├── run.py                   # CLI: ingest | search | eval | stats | remove
+│   ├── config/settings.py       # Scraper config (.env overridable)
+│   ├── src/core/                # DeepSeek client, E5 embeddings, Chroma store, retrieval policy
+│   ├── src/processing/          # fetch, HTML/table/PDF parsing, registry, chunking, enrichment, ingest
+│   └── data/                    # caches, state.json, reports/
 │
 ├── university-chatbot/          # Retrieval & chat project
 │   ├── config/settings.py       # Chatbot config
 │   ├── run.py                   # CLI entry point
 │   ├── src/
-│   │   ├── api/main.py          # FastAPI server + session management
+│   │   ├── api/main.py          # FastAPI server (routes, wiring)
+│   │   ├── api/sessions.py      # Session history (memory or Redis)
+│   │   ├── api/middleware.py    # Rate limiting (RATE_LIMIT per client IP)
 │   │   ├── core/
 │   │   │   ├── llm_manager.py   # Ollama wrappers (/api/chat & /api/generate)
 │   │   │   ├── embeddings.py    # Embedding utilities
@@ -275,15 +295,28 @@ Omitting these prefixes **degrades retrieval quality significantly**.
 
 ### Multi-turn conversation (v2)
 
-Three fixes were applied to enable proper multi-turn conversations:
+1. **History is never sent to the answering LLM** — every answer call is `[system, user("Kontekst: <chunks> … Pitanje: <question>")]` via `/api/chat`, so old answers (e.g. one still citing an outdated program) cannot leak into new ones.
+2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
+3. **Explicit context window** — `num_ctx=8192` is set on every Ollama call.
 
-1. **Full history sent to LLM** — every turn sends `[system, user1, assistant1, user2, ...]` via `/api/chat`.
-2. **Query contextualization** — follow-up questions are rewritten into standalone form before embedding (e.g. `"Koliko ESPB ima?"` → `"Koliko ESPB ima Uvod u programiranje?"`).
-3. **Context window guard** — `num_ctx=8192` is set explicitly; oldest history turns are trimmed if the budget is exceeded.
+### Study-program versions (old vs new program)
+
+Program pages hold several versions of the same program (e.g. Informatika
+OAS 2026 with 2 modules and 2019 with 3 modules).  The scraper labels every
+chunk (`version_label`, `accreditation_year`, `status`) and puts the label in
+the chunk header the LLM sees.  The scraper's DeepSeek check also flags
+unversioned text that contradicts the current program facts (e.g. an FAQ
+still saying "3 smera") with `outdated: true`.
+`VectorStoreManager._apply_version_policy` drops `status == "legacy"` and
+`outdated` chunks unless the question names an old year (2000–2018) or
+"stari program", and collapses duplicates (`dedup_key`); the system prompt
+tells the LLM to say which version each fact belongs to.
 
 ### Citations
 
 Every retrieved chunk carries metadata (`source`, `filename`, `type`, `page`, `url`).
+From the scraper, `filename` is the tab path (e.g. `Informatika › Osnovne (Upis 2026/27) › Računarske nauke`)
+and `url` opens that tab where the site supports it (`?osnovne_u_akreditaciji`); PDF links end in `#page=N`.
 The LLM sees chunks tagged as `[Izvor 1 — filename, strana N]` and can
 reference them inline.  The API appends a `--- Izvori:` block with
 deduplicated, human-readable citations.
@@ -296,7 +329,8 @@ deduplicated, human-readable citations.
 |---|---|
 | `ModuleNotFoundError: No module named 'langchain_community'` | Run `pip install -r requirements.txt` in the activated conda env |
 | Ollama connection refused | Ensure `ollama serve` is running in another terminal |
-| Empty answers / "Nisam pronašao..." | Run the scraper first to populate the vector store; check `VECTOR_DB_PATH` matches |
+| Empty answers / "Nisam pronašao..." | Run the scraper first to populate the vector store; check `VECTOR_DB_PATH` and `CHROMA_COLLECTION` match |
+| New scraper data not visible | Restart the chatbot after every ingest (each process caches the Chroma index) |
 | Streaming doesn't work (full response at once) | Ensure `langchain-community` is installed — `ChatOllama` handles token-by-token streaming |
 | Cyrillic answers when you want Latin | Set `DEFAULT_SCRIPT=latinic` or pass `"script":"latinic"` in the API request |
 | ChromaDB version mismatch | Both projects must use the **same** `chromadb` version — check with `pip show chromadb` |

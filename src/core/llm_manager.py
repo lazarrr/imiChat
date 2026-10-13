@@ -106,49 +106,26 @@ class LLMManager:
     #  Query-rewrite helper  (fast, low-token, single-turn)               #
     # ------------------------------------------------------------------ #
 
-    def rewrite_query(
-        self,
-        history_text: str,
-        latest_question: str,
-        is_unclear: bool = False,
-    ) -> str:
+    def rewrite_query(self, history_text: str, latest_question: str) -> str:
         """
-        Rewrite a follow-up question into a standalone question using the
-        last 1–2 turns of conversation history.
+        Rewrite an unclear follow-up question (e.g. "give me more
+        information on them") into a standalone question using the last
+        1–2 turns of conversation history.
+
+        Only called for questions that refer back to earlier context.  The
+        previous assistant answer is the main reference point for resolving
+        them; the previous user question is used only when the answer does
+        not name what the question refers to.  The answering LLM never sees
+        the history, so the rewrite must name the referenced entities.
 
         Uses a short /api/generate call with a small token budget so it's
         near-instant (< 1 s typical).
-
-        When ``is_unclear`` is True (the question relies on the previous
-        answer, e.g. "give me more information on them"), the previous
-        assistant answer is used as the reference point for resolving the
-        question — NOT the previous user question.
 
         The prompt is in Serbian because both the documents and the
         conversation are in Serbian (Latin script).
         """
         if not history_text.strip():
             return latest_question
-
-        if is_unclear:
-            reference_rule = (
-                "Najnovije pitanje je NEJASNO i oslanja se na kontekst "
-                "prethodnog ODGOVORA asistenta (na primer: 'daj mi vise "
-                "informacija o njima', 'sta je sa tim', 'pojasni'). "
-                "Da bi razresio na sta se pitanje odnosi, koristi iskljucivo "
-                "prethodni ODGOVOR asistenta — ne prethodno pitanje korisnika. "
-                "Zameni nejasne reci konkretnim pojmovima koje je asistent "
-                "naveo u svom odgovoru (npr. nazivi modula, predmeta, "
-                "programa). NE spajaj prethodno pitanje sa najnovijim — "
-                "prethodno pitanje sluzi samo kao kontekst.\n\n"
-            )
-        else:
-            reference_rule = (
-                "Ako se najnovije pitanje odnosi na nesto iz prethodnog "
-                "ODGOVORA asistenta, razresi ga pomocu tog odgovora. "
-                "NE spajaj prethodno pitanje sa najnovijim pitanjem — "
-                "prethodno pitanje sluzi samo kao kontekst za razumevanje.\n\n"
-            )
 
         prompt = (
             "Tvoj zadatak je da prepises najnovije korisnicko pitanje tako da "
@@ -159,9 +136,19 @@ class LLMManager:
             "Najnovije pitanje: "
             f"{latest_question}\n\n"
             "Pravila:\n"
-            + reference_rule
-            + "Vrati SAMO prepisano pitanje, nista drugo. Ne dodaj navodnike, "
-            "objasnjenja ni komentare. Prepisi ga na srpskom latinskom pismu."
+            "Najnovije pitanje se verovatno oslanja na kontekst prethodnog "
+            "ODGOVORA asistenta (na primer: 'daj mi vise informacija o njima', "
+            "'sta je sa tim', 'pojasni'). Da bi razresio na sta se pitanje "
+            "odnosi, koristi prethodni ODGOVOR asistenta; prethodno pitanje "
+            "korisnika koristi samo ako odgovor ne imenuje pojam na koji se "
+            "pitanje odnosi. Zameni nejasne reci konkretnim pojmovima (npr. "
+            "nazivi modula, predmeta, programa). NE spajaj prethodno pitanje "
+            "sa najnovijim — prethodno pitanje sluzi samo kao kontekst.\n"
+            "Ako je najnovije pitanje vec razumljivo samo po sebi, vrati ga "
+            "nepromenjeno.\n\n"
+            "Ne odgovaraj na pitanje. Vrati SAMO prepisano pitanje, nista drugo. "
+            "Ne dodaj navodnike, objasnjenja ni komentare. Prepisi ga na srpskom "
+            "latinskom pismu."
         )
 
         resp = self._client.generate(

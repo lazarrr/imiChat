@@ -5,25 +5,31 @@ FastAPI application for the University Chatbot.
 v2 — Multi-turn conversation support
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 - Each request carries an optional ``session_id``.
-- The server maintains an in-memory conversation history per session.
-- Every turn: rewrite the question for retrieval → embed → search →
-  build full message list (system + history + context) → call
-  Ollama /api/chat → stream tokens + sources → save turn to history.
+- The server keeps a conversation history per session — in memory, or in
+  Redis when REDIS_URL is set (see sessions.py).
+- Every turn: if the question refers back to an earlier answer ("njih",
+  "o njima", …) rewrite it into a standalone question using the history →
+  embed → search → send ONLY system prompt + retrieved chunks + question
+  to Ollama /api/chat (no history) → stream tokens + sources → save turn
+  to history.
+- /chat/stream is limited to RATE_LIMIT requests per minute per client IP
+  (see middleware.py).
 """
 
 from __future__ import annotations
 
 import json
-import time
 import logging
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from config.settings import settings
+from src.api.middleware import RateLimiter
+from src.api.sessions import MemorySessionStore, RedisSessionStore, connect_redis
 from src.core.vector_store import VectorStoreManager
 from src.core.llm_manager import LLMManager
 from src.chains.qa_chain import UniversityQASystem
@@ -44,61 +50,36 @@ app.add_middleware(
 )
 
 # ------------------------------------------------------------------ #
-#  In-memory session store                                            #
+#  Sessions + rate limiting                                           #
 # ------------------------------------------------------------------ #
-#  session_id → {"history": [{"role": ..., "content": ...}, ...],
-#                 "last_access": float}
+#  Kept in Redis when REDIS_URL is set (shared by all workers, kept
+#  across restarts), otherwise in this process's memory.
 # ------------------------------------------------------------------ #
 
-SESSION_TTL = 3600  # 1 hour — sessions older than this are pruned
+redis_client  = connect_redis(settings.REDIS_URL)
+session_store = RedisSessionStore(redis_client) if redis_client else MemorySessionStore()
+rate_limiter  = RateLimiter(settings.RATE_LIMIT, redis=redis_client)
 
-sessions: dict[str, dict] = {}
 
-
-def _get_history(session_id: str | None) -> list[dict[str, str]]:
-    """Retrieve conversation history for a session (empty list if new)."""
-    if not session_id or session_id not in sessions:
-        return []
-    sessions[session_id]["last_access"] = time.time()
-    return sessions[session_id]["history"]
+async def _check_rate_limit(request: Request) -> None:
+    """Dependency for /chat routes: HTTP 429 once a client IP exceeds RATE_LIMIT."""
+    client = request.client.host if request.client else "unknown"
+    if not rate_limiter.allow(client):
+        raise HTTPException(
+            status_code=429,
+            detail="Previše zahteva. Pokušajte ponovo za minut.",
+            headers={"Retry-After": str(rate_limiter.retry_after())},
+        )
 
 
 def _clean_answer(answer: str) -> str:
     """Strip the trailing source citation block so it does not pollute
-    the conversation history that is fed back to the LLM on future turns."""
+    the conversation history that the query-rewrite step reads on future
+    turns."""
     idx = answer.rfind("\n\n---\n")
     if idx != -1:
         return answer[:idx].strip()
     return answer
-
-
-def _save_turn(
-    session_id: str | None,
-    question: str,
-    answer: str,
-) -> None:
-    """Append a user/assistant turn to the session history."""
-    if not session_id:
-        return
-    if session_id not in sessions:
-        sessions[session_id] = {"history": [], "last_access": time.time()}
-    hist = sessions[session_id]["history"]
-    hist.append({"role": "user", "content": question})
-    hist.append({"role": "assistant", "content": _clean_answer(answer)})
-    sessions[session_id]["last_access"] = time.time()
-
-
-def _prune_sessions() -> None:
-    """Remove sessions that have exceeded SESSION_TTL."""
-    now = time.time()
-    stale = [
-        sid for sid, s in sessions.items()
-        if now - s.get("last_access", 0) > SESSION_TTL
-    ]
-    for sid in stale:
-        del sessions[sid]
-    if stale:
-        logger.info("Pruned %d stale session(s)", len(stale))
 
 
 # ------------------------------------------------------------------ #
@@ -149,7 +130,7 @@ qa_system = initialize_system()
 #  Routes                                                             #
 # ------------------------------------------------------------------ #
 
-@app.post("/chat/stream")
+@app.post("/chat/stream", dependencies=[Depends(_check_rate_limit)])
 async def chat_stream(request: ChatRequest):
     """Stream response token by token (SSE)."""
     try:
@@ -172,18 +153,16 @@ async def _stream_response(
       3. Accumulate the full answer.
       4. Save the completed turn to session history.
     """
-    history = _get_history(session_id)
-    _prune_sessions()  # occasional cleanup
-
     accumulated: list[str] = []
 
     try:
+        history = session_store.get_history(session_id)
         async for token in qa_system.query_stream(question, history):
             accumulated.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
 
         full_answer = "".join(accumulated)
-        _save_turn(session_id, question, full_answer)
+        session_store.save_turn(session_id, question, _clean_answer(full_answer))
 
         yield f"data: {json.dumps({'done': True})}\n\n"
 
@@ -193,7 +172,7 @@ async def _stream_response(
 
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "active_sessions": len(sessions)}
+    return {"status": "healthy", "active_sessions": session_store.active_count()}
 
 
 if __name__ == "__main__":
