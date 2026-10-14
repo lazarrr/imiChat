@@ -85,3 +85,29 @@ def test_retriever_skips_bm25_when_hybrid_disabled():
 
     assert retriever._bm25 is None
     assert [chunk.id for chunk in chunks] == ["x"]
+    assert chunks[0].dense_similarity is None
+
+
+def test_dense_search_reports_cosine_similarity():
+    class _DenseOnlyConfig(_Config):
+        HYBRID_RETRIEVAL_ENABLED = False
+
+    class _FakeVectorStore:
+        @staticmethod
+        def similarity_search(query, k):
+            return {
+                "ids": [["x", "y"]],
+                "documents": [["prvi", "drugi"]],
+                "metadatas": [
+                    [{"source": "a.pdf"}, {"source": "b.pdf"}]
+                ],
+                "distances": [[0.12, 0.5]],
+            }
+
+    retriever = HybridRetriever(
+        vector_store=_FakeVectorStore(), config=_DenseOnlyConfig()
+    )
+    chunks = retriever.retrieve("upit", k=5)
+
+    assert abs(chunks[0].dense_similarity - 0.88) < 1e-9
+    assert abs(chunks[1].dense_similarity - 0.5) < 1e-9

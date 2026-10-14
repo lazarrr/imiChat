@@ -114,13 +114,23 @@ The response is Server-Sent Events (SSE), token by token:
 data: {"token":"Predmet"}
 data: {"token":" Uvod"}
 ...
-data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12"}]}
+data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12","chunks":[{"id":"a1b2c3","text":"Uvod u programiranje nosi 6 ESPB...","similarity":0.87}]}]}
 data: {"done":true}
 ```
 
 Only sources the model actually cited are emitted; when a grounded answer
 carries no markers, it is attributed back to the chunks it draws from.  A
 refusal carries an empty `sources` list.
+
+Each source can carry the exact context `chunks` the answer was grounded
+in.  This answer provenance is controlled by `EXPOSE_ANSWER_CHUNKS` and
+bounded by `ANSWER_CHUNK_MAX_CHUNKS` / `ANSWER_CHUNK_CHAR_LIMIT`; the web
+UI renders it as an expandable "Prikaži kontekst odgovora" panel per
+source.  Every exposed chunk also reports its dense retrieval
+`similarity` (cosine, 0–1) and, for web sources, the `url` it was scraped
+from; the UI shows a "sličnost NN%" pill and a clickable host link under
+each excerpt.  With the flag off, the `chunks` key is omitted and the
+source list behaves exactly as before.
 
 ### Multi-turn conversation (with session)
 
@@ -166,6 +176,9 @@ environment variables or a `.env` file (see `.env.example`).
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
+| `EXPOSE_ANSWER_CHUNKS` | `True` | Attach the used context chunks to each cited source |
+| `ANSWER_CHUNK_MAX_CHUNKS` | `3` | Context chunks attached per cited source |
+| `ANSWER_CHUNK_CHAR_LIMIT` | `600` | Excerpt length per chunk (characters) |
 | `DEFAULT_SCRIPT` | `latinc` | `latinc` or `cyrillic` |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API server |
 

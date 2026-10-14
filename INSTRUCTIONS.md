@@ -101,6 +101,9 @@ via environment variables or a `.env` file.
 | `LLM_NUM_CTX` | `8192` | Context window (tokens) |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
+| `EXPOSE_ANSWER_CHUNKS` | `True` | Attach the used context chunks to each cited source |
+| `ANSWER_CHUNK_MAX_CHUNKS` | `3` | Context chunks attached per cited source |
+| `ANSWER_CHUNK_CHAR_LIMIT` | `600` | Excerpt length per chunk (characters) |
 | `API_HOST` | `0.0.0.0` | |
 | `API_PORT` | `8000` | |
 
@@ -203,7 +206,7 @@ data: {"token":"Predmet"}
 data: {"token":" Uvod"}
 data: {"token":" u"}
 ...
-data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12"}]}
+data: {"sources":[{"number":1,"filename":"informatika_oas_2021.pdf","page":12,"url":"","type":"pdf","label":"informatika_oas_2021.pdf — strana 12","chunks":[{"id":"a1b2c3","text":"Uvod u programiranje nosi 6 ESPB...","similarity":0.87}]}]}
 data: {"done":true}
 ```
 
@@ -215,6 +218,13 @@ markers, the answer is attributed back to the chunks it visibly draws from
 (rare-word overlap), so references still appear without listing unrelated
 documents.  On a refusal the `sources` list is empty; the server never
 appends a textual `--- Izvori:` block to the stream.
+
+Each source may also carry the exact context `chunks` the answer used
+(`EXPOSE_ANSWER_CHUNKS`, bounded by `ANSWER_CHUNK_MAX_CHUNKS` and
+`ANSWER_CHUNK_CHAR_LIMIT`); the web UI shows them in an expandable panel
+under each source.  Each chunk reports its dense search `similarity`
+(cosine, 0–1) and, for scraped pages, the source `url` — the UI renders a
+"sličnost NN%" pill and a clickable host link for every excerpt.
 
 ### Multi-turn conversation (with session)
 

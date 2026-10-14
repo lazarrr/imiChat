@@ -40,6 +40,10 @@ class RetrievedChunk:
     dense_rank: int | None = None
     bm25_rank: int | None = None
     rerank_score: float | None = None
+    # Cosine similarity of the dense query embedding (1 - cosine distance).
+    # ``None`` when the chunk came only from BM25 or the store returned no
+    # distances.
+    dense_similarity: float | None = None
 
 
 def _stable_id(document: str) -> str:
@@ -84,16 +88,23 @@ class HybridRetriever:
         ids = (results.get("ids") or [[]])[0]
         documents = (results.get("documents") or [[]])[0]
         metadatas = (results.get("metadatas") or [[]])[0]
+        # ChromaDB returns cosine distances; 1 - distance is the similarity
+        # used by SIMILARITY_THRESHOLD and reported to the client.
+        distances = (results.get("distances") or [[]])[0]
 
         chunks: list[RetrievedChunk] = []
         for rank, (document, metadata) in enumerate(zip(documents, metadatas)):
             chunk_id = ids[rank] if rank < len(ids) else _stable_id(document)
+            distance = distances[rank] if rank < len(distances) else None
             chunks.append(
                 RetrievedChunk(
                     id=chunk_id,
                     document=document,
                     metadata=metadata or {},
                     dense_rank=rank,
+                    dense_similarity=(
+                        None if distance is None else 1.0 - float(distance)
+                    ),
                 )
             )
         return chunks

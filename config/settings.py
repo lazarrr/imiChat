@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     RERANK_MODEL: str = "cross-encoder/mmarco-mMiniLMv2-L12-H384-v1"
     RERANK_CANDIDATES: int = 20
 
+    # Answer provenance: attach the exact context chunk(s) the answer was
+    # grounded in to each cited source, so the client can show what the
+    # answer was based on.
+    EXPOSE_ANSWER_CHUNKS: bool = True
+    ANSWER_CHUNK_MAX_CHUNKS: int = 3    # per cited source
+    ANSWER_CHUNK_CHAR_LIMIT: int = 600  # excerpt length sent to the client
+
     # Query rewrite
     REWRITE_TIMEOUT_SECONDS: float = 12.0
     REWRITE_SEED: int = 42           # fixed sampling seed → reproducible rewrites

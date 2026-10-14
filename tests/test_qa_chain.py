@@ -17,8 +17,14 @@ from src.chains.retriever import RetrievedChunk
 
 
 def _chunk(document: str, source: str, page: int = 0, **extra) -> RetrievedChunk:
+    return _raw_chunk(source, document, source, page=page, **extra)
+
+
+def _raw_chunk(
+    chunk_id: str, document: str, source: str, page: int = 0, **extra
+) -> RetrievedChunk:
     metadata = {"source": source, "filename": source, "page": page, **extra}
-    return RetrievedChunk(id=source, document=document, metadata=metadata)
+    return RetrievedChunk(id=chunk_id, document=document, metadata=metadata)
 
 
 class _FakeRetriever:
@@ -75,12 +81,24 @@ class _FakeVectorStore:
     config = None
 
 
+class _ChunkConfig:
+    TOP_K_RESULTS = 5
+    MORE_INFO_TOP_K = 10
+    REWRITE_TIMEOUT_SECONDS = 6.0
+    HYBRID_RETRIEVAL_ENABLED = False
+    EXPOSE_ANSWER_CHUNKS = True
+    ANSWER_CHUNK_MAX_CHUNKS = 3
+    ANSWER_CHUNK_CHAR_LIMIT = 600
+
+
 def _system(tokens, chunks):
     return _system_with(_FakeLLM(tokens), chunks)
 
 
-def _system_with(llm, chunks):
-    system = UniversityQASystem(llm, _FakeVectorStore(), _FakeTranslator())
+def _system_with(llm, chunks, config=None):
+    store = _FakeVectorStore()
+    store.config = config
+    system = UniversityQASystem(llm, store, _FakeTranslator())
     system.retriever = _FakeRetriever(chunks)
     return system
 
@@ -525,6 +543,107 @@ def test_query_strips_citations_and_returns_only_cited_sources():
     assert response["sources"] == ["[1] a.pdf — strana 1"]
     numbers = [row["number"] for row in response["sources_structured"]]
     assert numbers == [1]
+
+
+def test_streamed_sources_carry_the_chunk_the_answer_used():
+    chunk = _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")
+    system = _system(["Prva činjenica [Izvor 1]."], [chunk])
+
+    events = _collect(system, "pitanje")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert sources[0]["chunks"] == [
+        {"id": "a.pdf", "text": "Prva činjenica."}
+    ]
+
+
+def test_chunk_payload_includes_similarity_and_source_url():
+    chunk = _chunk(
+        "Prva činjenica.",
+        "a.pdf",
+        page=1,
+        type="pdf",
+        url="https://imi.pmf.kg.ac.rs/vesti/1",
+    )
+    chunk.dense_similarity = 0.8734
+    system = _system(["Prva činjenica [Izvor 1]."], [chunk])
+
+    events = _collect(system, "pitanje")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert sources[0]["chunks"] == [
+        {
+            "id": "a.pdf",
+            "text": "Prva činjenica.",
+            "url": "https://imi.pmf.kg.ac.rs/vesti/1",
+            "similarity": 0.8734,
+        }
+    ]
+
+
+def test_chunk_payload_omits_missing_url_and_similarity():
+    chunk = _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")
+    system = _system(["Prva činjenica [Izvor 1]."], [chunk])
+
+    events = _collect(system, "pitanje")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert sources[0]["chunks"] == [{"id": "a.pdf", "text": "Prva činjenica."}]
+
+
+def test_streamed_sources_carry_chunk_for_uncited_grounded_answer():
+    chunk = _chunk("Prva činjenica o informatici.", "a.pdf", page=1, type="pdf")
+    system = _system(["Prva činjenica o informatici bez oznake."], [chunk])
+
+    events = _collect(system, "pitanje o informatici")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert sources[0]["chunks"][0]["text"] == "Prva činjenica o informatici."
+
+
+def test_query_response_includes_answer_chunks():
+    chunk = _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")
+    system = _system(["Prva činjenica [Izvor 1]."], [chunk])
+
+    response = system.query("pitanje")
+
+    assert response["sources_structured"][0]["chunks"] == [
+        {"id": "a.pdf", "text": "Prva činjenica."}
+    ]
+
+
+def test_answer_chunks_can_be_disabled_by_settings():
+    config = _ChunkConfig()
+    config.EXPOSE_ANSWER_CHUNKS = False
+    chunk = _chunk("Prva činjenica.", "a.pdf", page=1, type="pdf")
+    system = _system_with(
+        _FakeLLM(["Prva činjenica [Izvor 1]."]), [chunk], config=config
+    )
+
+    events = _collect(system, "pitanje")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert "chunks" not in sources[0]
+
+
+def test_answer_chunks_are_truncated_and_capped_by_settings():
+    config = _ChunkConfig()
+    config.ANSWER_CHUNK_CHAR_LIMIT = 10
+    config.ANSWER_CHUNK_MAX_CHUNKS = 1
+    first = _raw_chunk(
+        "c1", "Prva činjenica je dugačka.", "a.pdf", page=1, type="pdf"
+    )
+    second = _raw_chunk("c2", "Druga činjenica.", "a.pdf", page=1, type="pdf")
+    system = _system_with(
+        _FakeLLM(["Odgovor [Izvor 1]."]), [first, second], config=config
+    )
+
+    events = _collect(system, "pitanje")
+    sources = [e for e in events if isinstance(e, SourcesChunk)][0].sources
+
+    assert sources[0]["chunks"] == [
+        {"id": "c1", "text": "Prva činje…"}
+    ]
 
 
 def test_stream_uncited_answer_attributes_only_relevant_sources():

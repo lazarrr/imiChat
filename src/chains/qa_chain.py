@@ -611,6 +611,18 @@ class UniversityQASystem:
         self.more_info_k = int(getattr(config, "MORE_INFO_TOP_K", 10))
         self.rewrite_timeout = getattr(config, "REWRITE_TIMEOUT_SECONDS", 6.0)
 
+        # Answer provenance: when enabled, each cited source in the response
+        # carries the exact chunk text the answer was grounded in.
+        self.expose_answer_chunks = bool(
+            getattr(config, "EXPOSE_ANSWER_CHUNKS", True)
+        )
+        self.answer_chunk_max_chunks = max(
+            1, int(getattr(config, "ANSWER_CHUNK_MAX_CHUNKS", 3))
+        )
+        self.answer_chunk_char_limit = max(
+            0, int(getattr(config, "ANSWER_CHUNK_CHAR_LIMIT", 600))
+        )
+
     # ------------------------------------------------------------------ #
     #  Source formatting                                                   #
     # ------------------------------------------------------------------ #
@@ -678,6 +690,93 @@ class UniversityQASystem:
             len(chunks),
         )
         return "\n\n".join(parts)
+
+    # ------------------------------------------------------------------ #
+    #  Answer provenance                                                   #
+    # ------------------------------------------------------------------ #
+
+    def _chunk_excerpt(self, text: str) -> str:
+        """Truncate a chunk to the configured excerpt length."""
+        text = text.strip()
+        limit = self.answer_chunk_char_limit
+        if limit <= 0 or len(text) <= limit:
+            return text
+        return text[:limit].rstrip() + "…"
+
+    def _chunk_payload(self, chunk: RetrievedChunk) -> dict:
+        """
+        One context chunk: its id, text excerpt and the search provenance
+        the client shows — the source URL (for scraped pages) and the
+        dense cosine similarity.  Fields with no value are omitted.
+        """
+        payload: dict = {
+            "id": chunk.id,
+            "text": self._chunk_excerpt(chunk.document),
+        }
+        url = str(chunk.metadata.get("url") or "").strip()
+        if url:
+            payload["url"] = url
+        if chunk.dense_similarity is not None:
+            payload["similarity"] = round(float(chunk.dense_similarity), 4)
+        return payload
+
+    def _answer_chunks_by_citation(
+        self,
+        registry: CitationRegistry,
+        cited: set[int],
+        chunks: list[RetrievedChunk],
+    ) -> dict[int, list[RetrievedChunk]]:
+        """
+        Map each cited source number to the retrieved chunk(s) it came from
+        (capped at ``ANSWER_CHUNK_MAX_CHUNKS`` per source).
+
+        These are the chunks the answer is actually grounded in: the ones
+        the model cited, or — for an uncited grounded answer — the ones
+        selected by :func:`_attribute_chunks`.
+        """
+        if not self.expose_answer_chunks or not cited:
+            return {}
+        by_number: dict[int, list[RetrievedChunk]] = {}
+        for chunk in chunks:
+            number = registry.number_for(chunk.metadata)
+            if number not in cited:
+                continue
+            bucket = by_number.setdefault(number, [])
+            if len(bucket) < self.answer_chunk_max_chunks:
+                bucket.append(chunk)
+        return by_number
+
+    def _structured_sources(
+        self,
+        registry: CitationRegistry,
+        cited: set[int],
+        chunks: list[RetrievedChunk],
+    ) -> list[dict]:
+        """
+        Build the structured ``sources`` payload for the client.
+
+        Each source row carries the metadata used for rendering plus, when
+        provenance is enabled, the ``chunks`` the answer was grounded in:
+        ``{"id": ..., "text": ..., "url": ..., "similarity": ...}``.  The
+        text is truncated to ``ANSWER_CHUNK_CHAR_LIMIT`` so a long chunk
+        cannot bloat the event; the URL is the scraped page and the
+        similarity is the dense cosine score of the retrieval query.
+        """
+        rows = registry.structured(cited)
+        by_number = self._answer_chunks_by_citation(registry, cited, chunks)
+        if not by_number:
+            return rows
+
+        for row in rows:
+            used = by_number.get(row["number"])
+            if used:
+                row["chunks"] = [self._chunk_payload(chunk) for chunk in used]
+        logger.info(
+            "Answer provenance: %d chunk(s) attached to %d cited source(s)",
+            sum(len(bucket) for bucket in by_number.values()),
+            len(by_number),
+        )
+        return rows
 
     # ------------------------------------------------------------------ #
     #  Conversation history helpers                                        #
@@ -1146,7 +1245,7 @@ class UniversityQASystem:
         answer, cited = self._finalize_answer(answer, registry)
         if not cited and not _is_refusal(answer):
             cited = self._attribute_cited(answer, chunks, registry)
-        response = self._response(question, answer, registry, cited)
+        response = self._response(question, answer, registry, cited, chunks)
         response["chunk_ids"] = [c.id for c in chunks]
         return response
 
@@ -1188,6 +1287,7 @@ class UniversityQASystem:
         answer: str,
         registry: CitationRegistry,
         cited: set[int],
+        chunks: list[RetrievedChunk],
     ) -> dict:
         if _is_refusal(answer, was_grounded=bool(cited)):
             return {
@@ -1200,7 +1300,9 @@ class UniversityQASystem:
             "question": question,
             "answer": answer,
             "sources": registry.footer(cited),
-            "sources_structured": registry.structured(cited),
+            "sources_structured": self._structured_sources(
+                registry, cited, chunks
+            ),
         }
 
     # ------------------------------------------------------------------ #
@@ -1267,4 +1369,4 @@ class UniversityQASystem:
             # documents and pile up as follow-ups retrieve deeper.
             if not cited:
                 cited = self._attribute_cited(answer, chunks, registry)
-            yield SourcesChunk(registry.structured(cited))
+            yield SourcesChunk(self._structured_sources(registry, cited, chunks))
