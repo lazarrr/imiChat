@@ -89,6 +89,11 @@ via environment variables or a `.env` file.
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
 | `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy drops legacy / duplicate chunks |
+| `QUERY_SYNONYMS` | `false` | Better retrieval (§8): add official terms for student wording (`SYNONYMS_FILE`, default `config/synonyms.txt`) |
+| `HYBRID_SEARCH` | `false` | Better retrieval (§8): fuse BM25 keyword search with vector search |
+| `RERANKER_ENABLED` | `false` | Better retrieval (§8): re-score candidates with `RERANKER_MODEL` (default `BAAI/bge-reranker-v2-m3`) on `RERANKER_DEVICE` (`cpu` / `cuda`) |
+| `RERANKER_MIN_SCORE` | `0.0` | Drop chunks the reranker scores below this (0–1); `0` = keep all |
+| `EVAL_QUESTIONS_FILE` | `../scraper/eval_questions.yaml` | Golden questions for `python run.py eval` |
 | `API_HOST` | `0.0.0.0` | |
 | `API_PORT` | `8000` | |
 | `RATE_LIMIT` | `100` | `/chat` requests per minute per client IP (`0` = no limit); HTTP 429 above it |
@@ -154,6 +159,9 @@ cd university-chatbot
 python run.py          # CLI interactive mode (follow-ups work; 'novo' resets)
 # OR
 python -m src.api.main  # FastAPI server (multi-turn with sessions)
+
+python run.py eval            # score retrieval on the golden questions
+python run.py eval --compare  # baseline vs. synonyms / hybrid / reranker (§8)
 ```
 
 ### CLI mode (`run.py`)
@@ -258,7 +266,8 @@ C:\Projects\
 │
 ├── university-chatbot/          # Retrieval & chat project
 │   ├── config/settings.py       # Chatbot config
-│   ├── run.py                   # CLI entry point
+│   ├── config/synonyms.txt      # Synonym groups for QUERY_SYNONYMS
+│   ├── run.py                   # CLI entry point (chat, `eval`)
 │   ├── src/
 │   │   ├── api/main.py          # FastAPI server (routes, wiring)
 │   │   ├── api/sessions.py      # Session history (memory or Redis)
@@ -266,7 +275,9 @@ C:\Projects\
 │   │   ├── core/
 │   │   │   ├── llm_manager.py   # Ollama wrappers (/api/chat & /api/generate)
 │   │   │   ├── embeddings.py    # Embedding utilities
-│   │   │   └── vector_store.py  # ChromaDB reader (E5 prefixes)
+│   │   │   ├── vector_store.py  # ChromaDB reader (E5 prefixes) + retrieval steps
+│   │   │   ├── keyword_search.py # BM25, Serbian tokenizer, synonyms, rank fusion
+│   │   │   └── reranker.py      # Cross-encoder reranking
 │   │   ├── chains/
 │   │   │   ├── qa_chain.py      # Core RAG logic (retrieve → prompt → answer)
 │   │   │   └── retriever.py     # Retrieval utilities
@@ -275,6 +286,7 @@ C:\Projects\
 │   │   │   ├── text_splitter.py
 │   │   │   └── translator.py    # Cyrillic ↔ Latin conversion
 │   │   └── utils/
+│   │       └── retrieval_eval.py # `run.py eval` — hit@k / MRR on golden questions
 │   └── data/vector_store/       # ← SHARED ChromaDB persist directory
 ```
 
@@ -312,6 +324,42 @@ still saying "3 smera") with `outdated: true`.
 "stari program", and collapses duplicates (`dedup_key`); the system prompt
 tells the LLM to say which version each fact belongs to.
 
+### Better retrieval (optional)
+
+`VectorStoreManager.similarity_search` always runs the vector search
+(`RETRIEVAL_FETCH_K` candidates, `SIMILARITY_THRESHOLD`, version policy).
+Three extra steps can each be switched on in `.env`; with all of them off
+(the default) retrieval is exactly the plain vector search:
+
+1. **`QUERY_SYNONYMS`** — before searching, adds the other terms of any
+   synonym group the question mentions (`config/synonyms.txt`: `smer,
+   modul`, `OAS, osnovne akademske studije`, …).  Matching ignores case,
+   diacritics, script and word endings.
+2. **`HYBRID_SEARCH`** — BM25 keyword search over all chunks (a Serbian
+   tokenizer folds diacritics and cuts case endings, so `predmeta` matches
+   `predmet`), merged with the vector ranking by reciprocal rank fusion.
+   Legacy / outdated chunks are filtered the same way as in the vector
+   search.  The keyword index is built in memory on the first question and
+   rebuilt when the collection's size changes.
+3. **`RERANKER_ENABLED`** — the version policy keeps `RETRIEVAL_FETCH_K`
+   candidates; a multilingual cross-encoder (`BAAI/bge-reranker-v2-m3`)
+   scores each against the original question (0–1) and the best
+   `TOP_K_RESULTS` are kept.  `RERANKER_MIN_SCORE` drops weak chunks, so
+   the bot answers "nemam informaciju" instead of using loosely related
+   text — tune it with the eval below and the scores in the log.
+
+Measure before switching anything on:
+
+```bash
+python run.py eval --compare
+```
+
+It runs the golden questions (`EVAL_QUESTIONS_FILE`, the scraper's
+`eval_questions.yaml`) through baseline, each step alone and all three, and
+prints the rank of the right chunk per question plus hit@k, MRR and
+seconds per question for each variant.  Add real student questions to that
+file to make the comparison meaningful.
+
 ### Citations
 
 Every retrieved chunk carries metadata (`source`, `filename`, `type`, `page`, `url`).
@@ -319,7 +367,9 @@ From the scraper, `filename` is the tab path (e.g. `Informatika › Osnovne (Upi
 and `url` opens that tab where the site supports it (`?osnovne_u_akreditaciji`); PDF links end in `#page=N`.
 The LLM sees chunks tagged as `[Izvor 1 — filename, strana N]` and can
 reference them inline.  The API appends a `--- Izvori:` block with
-deduplicated, human-readable citations.
+deduplicated, human-readable citations.  Chunks from the same page or
+section share one number, so `[Izvor N]` is always line `[N]` of that
+block; an answer saying there is no information gets no block.
 
 ---
 

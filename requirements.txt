@@ -33,6 +33,7 @@ python-docx>=1.0.0         # Word documents
 # Utilities
 pydantic>=2.5.0            # Data validation
 redis>=5.0.0               # Optional: shared sessions + rate limits (REDIS_URL)
+pyyaml>=6.0                # Golden questions for `run.py eval`
 pdfplumber>=0.9.0            # PDF text extraction
 python-docx>=1.0.0              # Word document processing
 requests>=2.35.0           # HTTP requests

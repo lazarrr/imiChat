@@ -1,0 +1,19 @@
+# Synonyms for query expansion (QUERY_SYNONYMS=true).
+#
+# One group of equivalent terms per line, comma-separated.  When a question
+# contains any term of a group, the other terms are added to the search
+# query, so student wording also finds documents that use the official
+# term.  Matching ignores case, diacritics, Cyrillic/Latin and word endings
+# (smer = smera = smerovi), so list each term once, in its base form.
+#
+# Keep groups to true equivalents — every added word also pulls in
+# documents that only mention that word.
+
+smer, modul
+faks, fakultet
+prijemni, prijemni ispit
+OAS, osnovne akademske studije, osnovne studije
+MAS, master akademske studije, master studije
+DAS, doktorske akademske studije, doktorske studije, doktorat
+ESPB, bodovi
+satnica, raspored časova
