@@ -35,9 +35,10 @@ _format_sources() turns that into human-readable citation lines:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Iterator
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,9 @@ _NO_INFO_REGEX = re.compile(
 )
 _CITATION_REGEX = re.compile(r"(?i)\bizvor\w*\s*\d|\[\d+\]")
 _NO_INFO_MAX_CHARS = 300
+
+# What next() returns once _stream_answer() is exhausted (see query_stream).
+_END_OF_STREAM = object()
 
 
 def _source_key(meta: dict) -> tuple:
@@ -513,6 +517,12 @@ class UniversityQASystem:
         """
         Stream response tokens — sources are yielded as a trailing block.
 
+        Every step is a blocking call (Ollama HTTP for the rewrite and the
+        answer, the E5 model and Chroma for retrieval), so each token of
+        _stream_answer() is fetched in a worker thread.  Run on the event
+        loop, those calls would hold up every other request — and /health —
+        until the whole answer had streamed.
+
         Parameters
         ----------
         question : str
@@ -522,8 +532,19 @@ class UniversityQASystem:
             Used only to rewrite unclear follow-up questions — it is never
             sent to the answering LLM.
         """
-        history = conversation_history or []
+        # A copy: the session store may append to its list while a worker
+        # thread is still reading this one.
+        tokens = self._stream_answer(question, list(conversation_history or []))
+        while True:
+            token = await asyncio.to_thread(next, tokens, _END_OF_STREAM)
+            if token is _END_OF_STREAM:
+                return
+            yield token
 
+    def _stream_answer(
+        self, question: str, history: list[dict[str, str]]
+    ) -> Iterator[str]:
+        """Blocking generator behind query_stream()."""
         # ── Step 1: Rewrite the question if it refers back ────────────── #
         search_question, unclear = self._resolve_question(question, history)
 

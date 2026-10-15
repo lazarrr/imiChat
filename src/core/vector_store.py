@@ -20,6 +20,7 @@ import os
 import re
 import hashlib
 import logging
+import threading
 from pathlib import Path
 
 import chromadb
@@ -102,6 +103,11 @@ class VectorStoreManager:
         self._synonyms: SynonymExpander | None = None
         self._keyword_index: BM25Index | None = None
         self._reranker: Reranker | None = None
+        # One search at a time: the API searches from worker threads (see
+        # UniversityQASystem.query_stream), and neither the lazily built
+        # components above nor the Hugging Face tokenizers are thread-safe.
+        # Answers still stream in parallel; only retrieval takes turns.
+        self._search_lock = threading.Lock()
         if self.use_synonyms:
             self._get_synonyms()
         if self.use_reranker:
@@ -225,8 +231,13 @@ class VectorStoreManager:
                             the question and the best k are kept (none
                             below RERANKER_MIN_SCORE)
         With every step off, this is exactly the plain vector search.
+        Searches from several threads run one at a time (_search_lock).
         """
-        k = k or self.top_k
+        with self._search_lock:
+            return self._search(query, k or self.top_k)
+
+    def _search(self, query: str, k: int) -> dict:
+        """similarity_search() itself, run while holding _search_lock."""
         collection = self.client.get_collection(self.collection_name)
         wants_old = bool(_LEGACY_QUERY_RE.search(query or ""))
 

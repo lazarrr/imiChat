@@ -8,7 +8,10 @@ tests are skipped where those are not installed.
     python -m unittest tests.test_vector_store -v
 """
 
+import threading
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -172,6 +175,31 @@ class SimilaritySearchTests(unittest.TestCase):
         results = store.similarity_search("Koliko ESPB nosi Osnovi programiranja?")
 
         self.assertIn(CHUNKS["k1"][0], documents(results))
+
+    def test_searches_from_several_threads_run_one_at_a_time(self):
+        # The API searches from worker threads; the models and the lazily
+        # built keyword index must never serve two searches at once.
+        store, model = make_store(self.collection, HYBRID_SEARCH=True)
+        encode = model.encode
+        counter_lock = threading.Lock()
+        running = peak = 0
+
+        def slow_encode(texts, **kwargs):
+            nonlocal running, peak
+            with counter_lock:
+                running += 1
+                peak = max(peak, running)
+            time.sleep(0.05)  # room for a second search to slip in
+            with counter_lock:
+                running -= 1
+            return encode(texts, **kwargs)
+
+        model.encode = slow_encode
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(store.similarity_search, ["ESPB"] * 4))
+
+        self.assertEqual(peak, 1)
+        self.assertEqual(self.collection.get_calls, 1)  # keyword index built once
 
 
 if __name__ == "__main__":

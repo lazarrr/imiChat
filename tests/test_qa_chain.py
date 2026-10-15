@@ -13,6 +13,7 @@ No Ollama or ChromaDB needed: the LLM manager and vector store are mocks.
 import asyncio
 import importlib.util
 import re
+import threading
 import unittest
 from unittest.mock import MagicMock
 
@@ -59,11 +60,23 @@ def make_system(rewrite=REWRITTEN, translator=None):
     return qa, llm, store
 
 
+async def drain(stream):
+    """All tokens of an async token stream."""
+    return [token async for token in stream]
+
+
 def collect(stream):
     """Run an async token stream to completion and return its tokens."""
-    async def run():
-        return [token async for token in stream]
-    return asyncio.run(run())
+    return asyncio.run(drain(stream))
+
+
+def on_event_loop() -> bool:
+    """True when called from the thread that runs the asyncio event loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
 
 
 class QuestionHandlingTests(unittest.TestCase):
@@ -158,6 +171,58 @@ class QuestionHandlingTests(unittest.TestCase):
         store.similarity_search.assert_called_once()
         llm.chat.assert_not_called()
         self.assertEqual(result["sources"], [])
+
+
+class EventLoopTests(unittest.TestCase):
+    """The rewrite, retrieval and the answer stream are blocking calls.  On
+    the event loop they would make the API answer one request at a time."""
+
+    def test_blocking_steps_run_off_the_event_loop(self):
+        qa, llm, store = make_system()
+        hit = store.similarity_search.return_value
+        on_loop = {}
+
+        def rewrite(history_text, question):
+            on_loop["rewrite"] = on_event_loop()
+            return REWRITTEN
+
+        def search(query, k=None):
+            on_loop["search"] = on_event_loop()
+            return hit
+
+        def stream(messages):
+            on_loop["answer"] = on_event_loop()
+            yield "Odgovor."
+
+        llm.rewrite_query.side_effect = rewrite
+        store.similarity_search.side_effect = search
+        llm.chat_stream.side_effect = stream
+
+        collect(qa.query_stream("Daj mi više informacija o njima", HISTORY))
+
+        self.assertEqual(on_loop, {"rewrite": False, "search": False, "answer": False})
+
+    def test_two_answers_stream_at_the_same_time(self):
+        # Each answer waits until the other one is streaming too.  If one
+        # stream held the event loop, the other request could not start
+        # and the barrier would time out.
+        both_streaming = threading.Barrier(2, timeout=5)
+
+        def stream(messages):
+            both_streaming.wait()
+            yield "Odgovor."
+
+        qa, llm, _ = make_system()
+        llm.chat_stream.side_effect = stream
+
+        async def two_requests():
+            return await asyncio.gather(
+                drain(qa.query_stream("Koliko ESPB ima Uvod u programiranje?", [])),
+                drain(qa.query_stream("Kada je upis na master studije?", [])),
+            )
+
+        for tokens in asyncio.run(two_requests()):
+            self.assertEqual(tokens[0], "Odgovor.")
 
 
 class SourceNumberingTests(unittest.TestCase):
