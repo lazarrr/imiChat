@@ -154,7 +154,10 @@ class LLMManager:
         resp = self._client.generate(
             model=self.model,
             prompt=prompt,
-            options={"temperature": 0.0, "num_predict": 128, "num_ctx": 2048},
+            # Same num_ctx as the answer calls: Ollama reloads the model
+            # whenever num_ctx changes, which would cost two reloads per
+            # rewritten question (rewrite, then answer).
+            options={"temperature": 0.0, "num_predict": 128, "num_ctx": self.num_ctx},
             stream=False,
         )
         result = resp["response"].strip()
