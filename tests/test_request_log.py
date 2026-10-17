@@ -37,7 +37,8 @@ TRACE = {
         "matched_pattern": "njega",
         "raw_response": "Koji su preduslovi za Uvod u programiranje?",
         "rejected": None,
-        "prompt": "Tvoj zadatak je da prepises...\nKorisnik: Koliko ESPB ima Uvod?",
+        "prompt": "Ti si modul za prepisivanje korisničkih pitanja...\n"
+                  "Istorija razgovora:\nKorisnik: Koliko ESPB ima Uvod?",
         "history_text": "Korisnik: Koliko ESPB ima Uvod u programiranje?\n"
                         "Asistent: Uvod u programiranje nosi 6 ESPB bodova.",
     },
@@ -117,7 +118,7 @@ class RecordBuilderTests(unittest.TestCase):
         self.assertEqual(rewrite["question_out"], "Koji su preduslovi za Uvod u programiranje?")
         self.assertTrue(rewrite["changed"])
         # The actual prompt and history the rewrite was given.
-        self.assertIn("Tvoj zadatak", rewrite["prompt"])
+        self.assertIn("Ti si modul za prepisivanje", rewrite["prompt"])
         self.assertEqual(rewrite["prompt_truncated"], False)
 
     def test_history_block_reports_its_size(self):

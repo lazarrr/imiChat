@@ -573,6 +573,12 @@ class UnclearDetectionTests(unittest.TestCase):
         "A koliko traje?",
         "Nabroj ih",
         "Tell me more about them",
+        # Short follow-ups named by the rewrite prompt.
+        "A oni su?",
+        "A koji su?",
+        "A gde?",
+        "Može malo više?",
+        "A šta je sa tim?",
     ]
     CLEAR = [
         "Koliko ESPB ima Uvod u programiranje?",

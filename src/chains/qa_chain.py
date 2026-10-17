@@ -12,9 +12,12 @@ Multi-turn conversation support (v2)
   questions that point back at the previous answer ("njih", "o njima",
   "njega", "više o tome", "A koliko…") are rewritten into a standalone
   question, which is used both for retrieval and as the question the LLM
-  answers.  The rewrite draws on the previous question (topic, entity
-  names) as well as the previous answer (what pronouns refer to).  Clear
-  questions are searched and answered exactly as typed.
+  answers.  The rewrite is the dedicated RAG rewrite prompt
+  (``QUERY_REWRITE_PROMPT`` in ``llm_manager.py``): it receives the last
+  1–2 turns, must never answer, resolves pronouns and short follow-ups
+  from that history, keeps an already standalone question unchanged and
+  returns only the question.  Clear questions are searched and answered
+  exactly as typed.
 - Unclear follow-ups fall back to history-assisted retrieval strategies
   (previous question, then previous answer) if the rewritten query
   returns no results.
@@ -65,6 +68,8 @@ _UNCLEAR_PATTERNS = [
     r"\bit\b", r"\bthis\b", r"\bthese\b", r"\bthose\b", r"\bthat\b",
     r"vi[šs]e informacij\w*", r"jo[šs] informacij\w*",
     r"vi[šs]e o\b", r"jo[šs] o\b",
+    # "može malo više?" — a request for more detail, named in the rewrite prompt
+    r"\bmalo vi[šs]e\b",
     r"detaljnij\w*", r"op[šs]irnij\w*", r"objasni\w*", r"pojasni\w*",
     r"nabroj\w*", r"koji su to\b",
     r"[šs]ta je sa\b", r"kako je sa\b", r"[šs]ta jo[šs]\b",
@@ -311,7 +316,7 @@ class UniversityQASystem:
         Time one pipeline stage into ``trace['timings_ms'][name]``.
 
         Stage times are what make a slow turn diagnosable from the log file:
-        the rewrite is a separate Ollama call, so a turn can spend seconds
+        the rewrite is a separate LLM call, so a turn can spend seconds
         there before retrieval even starts.
         """
         if trace is None:
@@ -778,7 +783,7 @@ class UniversityQASystem:
         """
         Stream response tokens — sources are yielded as a trailing block.
 
-        Every step is a blocking call (Ollama HTTP for the rewrite and the
+        Every step is a blocking call (LLM HTTP for the rewrite and the
         answer, the E5 model and Chroma for retrieval), so each token of
         _stream_answer() is fetched in a worker thread.  Run on the event
         loop, those calls would hold up every other request — and /health —

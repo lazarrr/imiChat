@@ -8,7 +8,7 @@ university, split into two projects that share a single ChromaDB vector store:
 | Project | What it does |
 |---|---|
 | `scraper` (C:\Projects\scraper) | Crawls the links listed in `links.txt`, parses HTML (incl. every tab panel) / PDF / DOCX, labels each chunk with its location and study-program version, validates + enriches it with DeepSeek, embeds, and writes to ChromaDB. |
-| `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Llama 3.1 8B (Ollama). |
+| `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Llama 3.1 8B (remote OpenAI-compatible server, or local Ollama when `LLM_USE_LOCAL=true`). |
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 
@@ -19,7 +19,7 @@ Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 | Component | Required |
 |---|---|
 | **Conda** (Miniconda or Anaconda) | Environment management |
-| **Ollama** | Local LLM inference (`brew install ollama` on macOS) |
+| **LLM endpoint** | Remote OpenAI-compatible server by default; **Ollama** only for local mode (`LLM_USE_LOCAL=true`) |
 | **Python** ≥ 3.10 | Language runtime |
 | **Git** | Clone / version control (optional) |
 
@@ -46,7 +46,29 @@ pip install -r requirements.txt
 
 ---
 
-## 2. Ollama setup
+## 2. LLM backend
+
+**Default: remote OpenAI-compatible server.**  Configure it in
+`university-chatbot/.env`:
+
+```dotenv
+LLM_USE_LOCAL=False
+LLM_REMOTE_BASE_URL=http://dyres.pmf.kg.ac.rs:11500/v1
+LLM_REMOTE_MODEL=llama3.1:8b
+LLM_REMOTE_API_KEY=<your-token>
+```
+
+The chatbot sends `POST {LLM_REMOTE_BASE_URL}/chat/completions` with an
+`Authorization: Bearer <key>` header — the same request as:
+
+```bash
+curl -X POST "http://dyres.pmf.kg.ac.rs:11500/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $LLM_REMOTE_API_KEY" \
+  -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}'
+```
+
+**Local Ollama (optional).**  Set `LLM_USE_LOCAL=True` and run:
 
 ```bash
 # Start the Ollama server (keep this running in a separate terminal)
@@ -56,8 +78,8 @@ ollama serve
 ollama pull llama3.1:latest
 ```
 
-Ollama runs at `http://localhost:11434` by default.  The chatbot
-connects to it automatically — no extra configuration needed.
+Ollama runs at `http://localhost:11434` by default; `LLM_MODEL` must match
+`ollama list`.
 
 The chatbot also downloads `intfloat/multilingual-e5-large` for
 embeddings on first run (≈ 2.2 GB, one-time download).
@@ -82,10 +104,16 @@ via environment variables or a `.env` file.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_MODEL` | `llama3.1:latest` | Must match `ollama list` |
+| `LLM_USE_LOCAL` | `false` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
+| `LLM_MODEL` | `llama3.1:latest` | Local Ollama model (must match `ollama list`) |
+| `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | Remote API root; `/chat/completions` is appended |
+| `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
+| `LLM_REMOTE_API_KEY` | *(empty)* | Sent as `Authorization: Bearer <key>` |
+| `LLM_REMOTE_TIMEOUT` | `300` | Read timeout (seconds) |
 | `LLM_TEMPERATURE` | `0.0` | 0 = deterministic |
 | `LLM_MAX_TOKENS` | `2048` | Max response length |
-| `LLM_NUM_CTX` | `8192` | Context window (tokens) |
+| `LLM_NUM_CTX` | `8192` | Local Ollama context window (tokens) |
+| `LLM_REPEAT_PENALTY` / `LLM_REPEAT_LAST_N` | `1.2` / `256` | Loop guard; remote uses `frequency_penalty = repeat_penalty - 1` |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
 | `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy drops legacy / duplicate chunks |
@@ -235,14 +263,19 @@ curl -X POST http://localhost:8000/chat/stream \
 1. Detects an unclear follow-up: the question contains a reference word
    (`njega`) and session `abc123` has history.
 2. Calls Llama 3.1 to rewrite `"Koji su preduslovi za njega?"` →
-   `"Koji su preduslovi za Uvod u programiranje?"`. The rewrite prompt gets
-   the last 1–2 turns and is told to use **both** the previous user question
-   (topic and entity names) and the previous assistant answer (what the
-   pronoun refers to).
+   `"Koji su preduslovi za Uvod u programiranje?"`. The rewrite prompt
+   (`QUERY_REWRITE_PROMPT` in `llm_manager.py`) gets the last 1–2 turns —
+   both the previous user question (topic and entity names) and the previous
+   assistant answer (what the pronoun refers to) — and follows an explicit
+   rule set: never answer, resolve references from the history, preserve the
+   user's intent, add no facts, keep an already standalone question
+   unchanged, ignore the history for an unrelated new topic, and return only
+   the standalone question.
 3. Embeds the **rewritten** question (with `query: ` prefix) and
    retrieves relevant chunks from ChromaDB.
 4. Sends **only** the system prompt + retrieved chunks + rewritten question
-   to Ollama `/api/chat` — the conversation history is not sent.
+   to the configured LLM backend (remote `/v1/chat/completions` or local
+   Ollama `/api/chat`) — the conversation history is not sent.
 5. Streams the answer token-by-token + appends `--- Izvori:` block.
 6. Saves both the original question and answer to the session history.
 
@@ -276,7 +309,7 @@ C:\Projects\
 │   │   ├── api/sessions.py      # Session history (memory or Redis)
 │   │   ├── api/middleware.py    # Rate limiting (RATE_LIMIT per client IP)
 │   │   ├── core/
-│   │   │   ├── llm_manager.py   # Ollama wrappers (/api/chat & /api/generate)
+│   │   │   ├── llm_manager.py   # LLM backends (remote OpenAI API / local Ollama)
 │   │   │   ├── embeddings.py    # Embedding utilities
 │   │   │   ├── vector_store.py  # ChromaDB reader (E5 prefixes) + retrieval steps
 │   │   │   ├── keyword_search.py # BM25, Serbian tokenizer, synonyms, rank fusion
@@ -310,10 +343,10 @@ Omitting these prefixes **degrades retrieval quality significantly**.
 
 ### Multi-turn conversation (v2)
 
-1. **History is never sent to the answering LLM** — every answer call is `[system, user("Kontekst: <chunks> … Pitanje: <question>")]` via `/api/chat`, so old answers (e.g. one still citing an outdated program) cannot leak into new ones.
-2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewrite prompt (`LLMManager.rewrite_query`) is fed the whole previous turn and told to use both parts: the previous **question** supplies the topic and entity names, the previous **answer** supplies what the pronoun points at; an elliptical follow-up (`"A koliko traje?"`, `"I šta još?"`) inherits the previous question's subject. The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
+1. **History is never sent to the answering LLM** — every answer call is `[system, user("Kontekst: <chunks> … Pitanje: <question>")]` via the configured backend, so old answers (e.g. one still citing an outdated program) cannot leak into new ones.
+2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, `malo više?`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewrite prompt (`QUERY_REWRITE_PROMPT` in `llm_manager.py`) is fed the last 1–2 turns — the previous **question** supplies the topic and entity names, the previous **answer** supplies what the pronoun points at — and follows an explicit rule set: never answer, resolve references from the history, preserve the user's intent, add no facts, keep an already standalone question unchanged, ignore the history for an unrelated new topic, and return only the standalone question. The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
 3. **Retrieval fallbacks use the history (unclear follow-ups only)** — if the rewritten query returns nothing, the search is retried in order with the original question, then `previous question + current question`, then `last answer + current question`. A clear question never falls back to history.
-4. **Explicit context window** — `num_ctx=8192` is set on every Ollama call.
+4. **Explicit context window** — `num_ctx=8192` is set on every local Ollama call (the remote endpoint manages its own context).
 5. **Every turn is traced to `logs/requests.jsonl`** — one JSON object per answered turn, written by the API after the answer streams (`src/api/request_log.py`). It holds the question as typed, the history text the rewrite saw, the full rewrite prompt and raw model output with the guard that accepted or rejected it, every retrieval query tried with hit counts, the chunks sent to the LLM **with their whole vector-store metadata**, the chunks retrieval dropped with the reason and search attempt that dropped them, the exact prompt, the answer with sources, and per-stage timings. Dropped chunks are collected by `similarity_search(..., diagnostics=True)` — an extra Chroma query without the current-version filter, run only when the request is being logged, so it never changes the visible result or costs anything in normal operation. A failure is logged too (`failed: true`), including a client that hung up mid-answer. The chain fills in a `trace` dict passed by the API and never writes files itself; a separate visualization project reads the file.
 
 ### Study-program versions (old vs new program)
@@ -383,9 +416,11 @@ block; an answer saying there is no information gets no block.
 | Problem | Solution |
 |---|---|
 | `ModuleNotFoundError: No module named 'langchain_community'` | Run `pip install -r requirements.txt` in the activated conda env |
-| Ollama connection refused | Ensure `ollama serve` is running in another terminal |
+| Remote LLM returns 401/403 | Check `LLM_REMOTE_API_KEY` (sent as a Bearer token) |
+| Remote LLM connection timed out | Check that `LLM_REMOTE_BASE_URL` is reachable; raise `LLM_REMOTE_TIMEOUT` if needed |
+| Ollama connection refused | Only applies to local mode: set `LLM_USE_LOCAL=false` to use the remote server, or start `ollama serve` in another terminal |
 | Empty answers / "Nisam pronašao..." | Run the scraper first to populate the vector store; check `VECTOR_DB_PATH` and `CHROMA_COLLECTION` match |
 | New scraper data not visible | Restart the chatbot after every ingest (each process caches the Chroma index) |
-| Streaming doesn't work (full response at once) | Ensure `langchain-community` is installed — `ChatOllama` handles token-by-token streaming |
+| Streaming doesn't work (full response at once) | Remote mode uses SSE; local mode needs `langchain-community` — `ChatOllama` handles token-by-token streaming |
 | Cyrillic answers when you want Latin | Set `DEFAULT_SCRIPT=latinic` or pass `"script":"latinic"` in the API request |
 | ChromaDB version mismatch | Both projects must use the **same** `chromadb` version — check with `pip show chromadb` |

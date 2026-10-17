@@ -9,7 +9,7 @@ Why a separate file and not the normal log
 for operators.  This module writes *structured* records to a file for a
 separate visualization project: every line is a self-contained JSON object,
 so that project needs no access to this codebase, the vector store or
-Ollama — only the file.
+the LLM backend — only the file.
 
 What a record contains
 ----------------------

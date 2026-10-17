@@ -10,8 +10,8 @@ v2 — Multi-turn conversation support
 - Every turn: if the question refers back to an earlier answer ("njih",
   "o njima", …) rewrite it into a standalone question using the history →
   embed → search → send ONLY system prompt + retrieved chunks + question
-  to Ollama /api/chat (no history) → stream tokens + sources → save turn
-  to history.
+  to the configured LLM backend (no history) → stream tokens + sources →
+  save turn to history.
 - /chat/stream is limited to RATE_LIMIT requests per minute per client IP
   (see middleware.py).
 """
