@@ -129,7 +129,10 @@ curl -X POST http://localhost:8000/chat/stream \
 On turn 2 the chatbot spots the reference word (`njega`) and rewrites the
 follow-up into a standalone question (e.g. `"Koji su preduslovi za Uvod u
 programiranje?"`). That rewritten question is used for retrieval and is the
-only question the LLM sees, together with the retrieved chunks. The
+only question the LLM sees, together with the retrieved chunks. The rewrite
+uses the whole previous turn — the previous **question** names the topic
+(elliptical follow-ups like `"A koliko traje?"` inherit it) and the previous
+**answer** names what a pronoun such as `njega`/`njima` refers to. The
 conversation history itself is never sent to the LLM; it is kept only for
 these rewrites. Questions without such a reference are searched and
 answered exactly as typed.
@@ -162,6 +165,46 @@ environment variables or a `.env` file (see `.env.example`).
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API server |
 | `RATE_LIMIT` | `100` | `/chat` requests per minute per client IP (`0` = no limit); HTTP 429 above it |
 | `REDIS_URL` | *(unset)* | Optional, e.g. `redis://localhost:6379/0` — sessions and rate limits shared by all workers and kept across restarts (otherwise in memory) |
+| `REQUEST_LOG_ENABLED` | `true` | Write one JSON trace line per answered turn |
+| `REQUEST_LOG_PATH` | `./logs/requests.jsonl` | Where that file lives |
+| `REQUEST_LOG_MAX_BYTES` / `REQUEST_LOG_BACKUPS` | `20000000` / `5` | Rotate the file at ~20 MB, keeping `requests.jsonl.1` … `.5` |
+| `REQUEST_LOG_MAX_TEXT` | `8000` | Per-field cap (chars) for prompts, chunk bodies and history text |
+| `REQUEST_LOG_MAX_EXCLUDED` | `40` | Dropped chunks logged per turn (the total is always logged) |
+
+## Request log (for the visualization project)
+
+Every answered turn appends **one JSON object per line** to
+`logs/requests.jsonl` (see `src/api/request_log.py`). The file is the entire
+interface between this project and a separate project that visualizes what
+the chatbot did — the visualizer needs no access to this code, ChromaDB or
+Ollama, only the file. Nothing here ever reads it back.
+
+Each line answers "what did the system actually search for, and why?":
+
+| Field | Contents |
+|---|---|
+| `request_id`, `timestamp`, `session_id`, `client`, `duration_ms` | Who asked, which session, when, how long |
+| `summary` | Flat one-liner for a list view: rewritten?, strategy, chunk/source counts, failed? |
+| `question`, `search_question`, `unclear` | As typed, as searched, and the unclear verdict |
+| `history.session_turns` / `messages_included` / `text` | Exactly the last 1–2 turns the rewrite was allowed to see |
+| `rewrite.prompt`, `.raw_response`, `.result`, `.matched_pattern` | The full rewrite prompt, the model's raw output, and the guard that accepted or rejected it (`accepted`, `empty`, `too_short`, `too_long`, `unchanged`, `skipped_clear_question`, `skipped_no_history`) — with `rejected` holding the discarded candidate |
+| `retrieval.attempts`, `.winning_strategy` | Every query tried in order with its hit count and top distance, including the ones that found nothing |
+| `chunks` | The chunks that went into the prompt, with source, page, distance, body and **the whole vector-store metadata dict** (`metadata`) — every field, including ones the chatbot does not use |
+| `chunks_excluded` | Chunks that were retrieved but rejected before the prompt, each with its `reason` (below the similarity threshold, previous program version, outdated, duplicate, reranker, did not fit in top-k), its metadata, its text and the search attempt that produced it. Capped at `REQUEST_LOG_MAX_EXCLUDED`; `chunks_excluded_total` always holds the real count |
+| `prompt.user_content` | The exact message sent to the answering model (no history) |
+| `answer.text`, `.sources` | The model's answer and the rendered `Izvori` block |
+| `timings_ms` | Per stage: `rewrite`, `retrieval`, `answer`, `total` |
+| `failed`, `error` | Set when the turn ended in an error; a client that hung up mid-answer is still logged |
+
+Long fields are capped at `REQUEST_LOG_MAX_TEXT` chars and carry
+`<field>_chars`, `<field>_full_chars` and `<field>_truncated`, so a truncated
+prompt is recognizable as truncated. `schema_version` (currently `1`) is on
+every record; readers should ignore unknown keys.
+
+```bash
+# peek at the last turn
+tail -n 1 logs/requests.jsonl | python -m json.tool
+```
 
 ## Better retrieval (optional)
 
@@ -197,6 +240,7 @@ variant, then hit@k, MRR and seconds per question for each variant.
 │   ├── api/
 │   │   ├── main.py            # FastAPI server (routes, wiring)
 │   │   ├── sessions.py        # Session history (memory or Redis)
+│   │   ├── request_log.py     # Per-turn JSONL trace read by the visualizer
 │   │   └── middleware.py      # Rate limiting (RATE_LIMIT per client IP)
 │   ├── core/
 │   │   ├── llm_manager.py     # Ollama wrappers (/api/chat & /api/generate)
@@ -216,6 +260,8 @@ variant, then hit@k, MRR and seconds per question for each variant.
 ├── data/
 │   ├── raw/                   # Local files to index
 │   └── vector_store/          # Shared ChromaDB persist directory
+├── logs/
+│   └── requests.jsonl         # Per-turn trace (gitignored) — visualizer input
 └── tests/
 ```
 
@@ -247,6 +293,9 @@ variant, then hit@k, MRR and seconds per question for each variant.
 A modern web chat interface lives in [`web_ui/`](web_ui/). It talks to the
 FastAPI server above (streaming via SSE, multi-turn sessions, source
 citations, dark mode, persisted conversations).
+
+Keyboard: `Enter` sends the question, `Shift + Enter` inserts a line break.
+The chat history is searchable and grouped by recency in the sidebar.
 
 ### Run (development)
 

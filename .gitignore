@@ -47,7 +47,8 @@ data/processed/
 
 # ===== LLM model files =====
 # Downloaded models (Ollama, Hugging Face, llama.cpp) — too large for git
-models/
+# Anchored to the repo root so it does not swallow web_ui/lib/models/.
+/models/
 *.gguf
 *.ggml
 *.bin
@@ -134,6 +135,8 @@ coverage.xml
 docker-compose.override.yml
 
 # ===== Misc =====
+# Local UI preview screenshots (not part of the project)
+.verify-shots/
 # mypy type checker cache
 .mypy_cache/
 .dmypy.json

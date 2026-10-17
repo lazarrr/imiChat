@@ -32,7 +32,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 # Reuse the same header/footer-aware loaders used by DocumentProcessor
 from src.processing.document_loader import DocumentProcessor
 from src.core.keyword_search import BM25Index, SynonymExpander, reciprocal_rank_fusion
-from src.core.reranker import Reranker, keep_best
+from src.core.reranker import Reranker
 
 logger = logging.getLogger(__name__)
 
@@ -211,7 +211,9 @@ class VectorStoreManager:
     #  Retrieval                                                           #
     # ------------------------------------------------------------------ #
 
-    def similarity_search(self, query: str, k: int | None = None) -> dict:
+    def similarity_search(
+        self, query: str, k: int | None = None, diagnostics: bool = False
+    ) -> dict:
         """
         Search the collection and return the best k chunks (k defaults to
         TOP_K_RESULTS).
@@ -232,14 +234,36 @@ class VectorStoreManager:
                             below RERANKER_MIN_SCORE)
         With every step off, this is exactly the plain vector search.
         Searches from several threads run one at a time (_search_lock).
+
+        ``diagnostics=True`` additionally reports the chunks that were
+        retrieved but did **not** make it into the result, with the reason
+        each one was dropped (``results["excluded"]``, ``results["excluded_total"]``).
+        It costs one extra Chroma query without the current-version filter,
+        so it is off by default and only the request log turns it on.  The
+        visible result is identical either way.
         """
         with self._search_lock:
-            return self._search(query, k or self.top_k)
+            return self._search(query, k or self.top_k, diagnostics=diagnostics)
 
-    def _search(self, query: str, k: int) -> dict:
+    def _search(self, query: str, k: int, diagnostics: bool = False) -> dict:
         """similarity_search() itself, run while holding _search_lock."""
         collection = self.client.get_collection(self.collection_name)
         wants_old = bool(_LEGACY_QUERY_RE.search(query or ""))
+        # Chunks dropped on the way to the final k: reason, text, metadata,
+        # distance.  Only filled in when diagnostics are requested.
+        excluded: list[dict] = []
+
+        def drop(reason: str, chunk_id, doc, meta, dist, **extra) -> None:
+            if not diagnostics:
+                return
+            excluded.append({
+                "chunk_id": chunk_id,
+                "reason": reason,
+                "distance": dist,
+                "metadata": dict(meta or {}),
+                "text": doc or "",
+                **extra,
+            })
 
         search_query = query
         if self.use_synonyms:
@@ -257,6 +281,30 @@ class VectorStoreManager:
             include=["documents", "metadatas", "distances"],
         )
 
+        # Re-query without the current-version filter, to see what that filter
+        # hid: chunks with status="legacy" / outdated=true never appear in
+        # `results`, so they can only be reported from a second query.
+        if diagnostics and not wants_old:
+            try:
+                wide = collection.query(
+                    query_embeddings=[query_embedding.tolist()],
+                    n_results=min(max(k, self.fetch_k) * 3, 60),
+                    where=None,
+                    include=["documents", "metadatas", "distances"],
+                )
+                visible = set(results["ids"][0])
+                for chunk_id, doc, meta, dist in zip(
+                    wide["ids"][0], wide["documents"][0],
+                    wide["metadatas"][0], wide["distances"][0],
+                ):
+                    if chunk_id in visible:
+                        continue
+                    reason = ("excluded_outdated" if (meta or {}).get("outdated") is True
+                              else "excluded_legacy_version")
+                    drop(reason, chunk_id, doc, meta, dist)
+            except Exception as e:  # pragma: no cover - diagnostics must not break search
+                logger.warning("Diagnostic query failed (%s) - no excluded chunks reported", e)
+
         # Apply threshold filter.  candidates: chunk id → (doc, meta, distance)
         candidates: dict[str, tuple] = {}
         n_filtered = 0
@@ -270,6 +318,8 @@ class VectorStoreManager:
                 candidates[chunk_id] = (doc, meta, dist)
             else:
                 n_filtered += 1
+                drop("excluded_threshold", chunk_id, doc, meta, dist,
+                     threshold=self.distance_threshold)
         if n_filtered:
             logger.info(
                 "Filtered out %d chunk(s) (distance > threshold %.3f)",
@@ -292,29 +342,44 @@ class VectorStoreManager:
             [candidates[c][1] for c in ranking],
             [candidates[c][2] for c in ranking],
             max(k, self.fetch_k) if self.use_reranker else k,
+            exclude=lambda reason, doc, meta, dist: drop(reason, None, doc, meta, dist),
         )
 
         if self.use_reranker and filtered_docs:
             scores = self._get_reranker().score(query, filtered_docs)
-            best = keep_best(
-                scores,
-                list(zip(filtered_docs, filtered_meta, filtered_dists)),
-                k,
-                self.rerank_min_score,
+            # keep_best(), unrolled, so the chunks the reranker drops are
+            # reported instead of silently vanishing.
+            pairs = sorted(
+                zip(scores, zip(filtered_docs, filtered_meta, filtered_dists)),
+                key=lambda pair: pair[0], reverse=True,
             )
+            kept, dropped = [], []
+            for score, (doc, meta, dist) in pairs:
+                if len(kept) < k and score >= self.rerank_min_score:
+                    kept.append((score, (doc, meta, dist)))
+                else:
+                    dropped.append((score, (doc, meta, dist)))
+            for score, (doc, meta, dist) in dropped:
+                drop("excluded_reranker", None, doc, meta, dist,
+                     rerank_score=round(float(score), 4),
+                     rerank_min_score=self.rerank_min_score)
             logger.info(
                 "Reranker: kept %d of %d candidate(s); scores %s",
-                len(best), len(filtered_docs), [round(score, 3) for score, _ in best],
+                len(kept), len(filtered_docs), [round(score, 3) for score, _ in kept],
             )
-            filtered_docs  = [doc for _, (doc, _, _) in best]
-            filtered_meta  = [meta for _, (_, meta, _) in best]
-            filtered_dists = [dist for _, (_, _, dist) in best]
+            filtered_docs  = [doc for _, (doc, _, _) in kept]
+            filtered_meta  = [meta for _, (_, meta, _) in kept]
+            filtered_dists = [dist for _, (_, _, dist) in kept]
 
-        return {
+        payload = {
             "documents": [filtered_docs],
             "metadatas": [filtered_meta],
             "distances": [filtered_dists],
         }
+        if diagnostics:
+            payload["excluded"] = excluded[:100]
+            payload["excluded_total"] = len(excluded)
+        return payload
 
     @staticmethod
     def _apply_version_policy(
@@ -323,6 +388,7 @@ class VectorStoreManager:
         metadatas: list,
         distances: list,
         k: int,
+        exclude=None,
     ) -> tuple[list, list, list]:
         """
         Version-aware result policy (same rules as the scraper's
@@ -336,17 +402,27 @@ class VectorStoreManager:
           2. collapse chunks sharing a dedup_key (same text, same version)
           3. keep the best k
         Chunks without these metadata fields pass through unchanged.
+
+        ``exclude(reason, doc, meta, dist)`` is called for every dropped
+        chunk, which is how the request log explains why a candidate did not
+        reach the model.
         """
         keep_legacy = bool(_LEGACY_QUERY_RE.search(query or ""))
         docs, metas, dists = [], [], []
         seen: set[str] = set()
-        for doc, meta, dist in zip(documents, metadatas, distances):
+        for index, (doc, meta, dist) in enumerate(zip(documents, metadatas, distances)):
             meta = meta or {}
             if not keep_legacy and (meta.get("status") == "legacy" or meta.get("outdated") is True):
+                if exclude:
+                    reason = "excluded_outdated" if meta.get("outdated") is True \
+                        else "excluded_legacy_version"
+                    exclude(reason, doc, meta, dist)
                 continue
             key = meta.get("dedup_key")
             if key:
                 if key in seen:
+                    if exclude:
+                        exclude("excluded_duplicate", doc, meta, dist)
                     continue
                 seen.add(key)
             docs.append(doc)

@@ -1,7 +1,15 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 class Settings(BaseSettings):
+    # `.env` is not versioned and is shared by every branch/deployment, so it
+    # regularly carries variables this revision does not know about (e.g. the
+    # remote-LLM and repetition-control keys used by the OpenAI-compatible
+    # backend).  Ignore those instead of refusing to start — pydantic-settings
+    # forbids unknown keys by default, which turns a stale `.env` line into a
+    # ValidationError at import time.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
     # LLM Configuration
     LLM_PROVIDER: str = "ollama"  # ollama or llama_cpp
     LLM_MODEL: str = "llama3.1:latest"
@@ -46,12 +54,22 @@ class Settings(BaseSettings):
     API_PORT: int = 8000
     RATE_LIMIT: int = 100  # /chat requests per minute per client IP (0 = no limit)
 
+    # Request trace log — one JSON object per answered turn, written by the
+    # API to REQUEST_LOG_PATH (see src/api/request_log.py).  It records the
+    # whole pipeline: the question as typed, how it was normalized and
+    # rewritten, which retrieval strategies were tried, the chunks that were
+    # sent to the LLM, and the answer.  A separate visualization project
+    # reads this file; the chatbot never reads it back.
+    REQUEST_LOG_ENABLED: bool = True
+    REQUEST_LOG_PATH: str = "./logs/requests.jsonl"
+    REQUEST_LOG_MAX_BYTES: int = 20_000_000  # rotate after ~20 MB
+    REQUEST_LOG_BACKUPS: int = 5             # requests.jsonl.1 … .5
+    REQUEST_LOG_MAX_TEXT: int = 8000         # per-field cap (chars) for prompt/context/chunk text
+    REQUEST_LOG_MAX_EXCLUDED: int = 40       # dropped chunks logged per turn (the count is always logged)
+
     # Redis (optional) — when set, chat sessions and rate-limit counters live
     # in Redis (shared by all API workers, kept across restarts); otherwise
     # they are kept in the API process's memory.
     REDIS_URL: Optional[str] = None  # e.g. "redis://localhost:6379/0"
-    
-    class Config:
-        env_file = ".env"
 
 settings = Settings()

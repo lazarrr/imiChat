@@ -43,6 +43,11 @@ class _UniChatAppState extends State<UniChatApp> {
           theme: buildTheme(Brightness.light),
           darkTheme: buildTheme(Brightness.dark),
           themeMode: _controller.themeMode,
+          themeAnimationDuration: const Duration(milliseconds: 280),
+          themeAnimationCurve: kEase,
+          scrollBehavior: const MaterialScrollBehavior().copyWith(
+            scrollbars: true,
+          ),
           home: HomeScreen(controller: _controller),
         );
       },

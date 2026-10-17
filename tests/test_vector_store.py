@@ -35,8 +35,10 @@ class FakeCollection:
         self.chunks = dict(chunks)
         self.vector_hits = vector_hits
         self.get_calls = 0
+        self.query_where_log = []
 
     def query(self, query_embeddings, n_results, where, include):
+        self.query_where_log.append(where)
         hits = [
             (chunk_id, dist) for chunk_id, dist in self.vector_hits
             if where is None or vector_store._is_current(self.chunks[chunk_id][1])
@@ -159,6 +161,90 @@ class SimilaritySearchTests(unittest.TestCase):
 
         # candidates v1, v2, v3 scored 0.6, 0.1, 0.9 → best two above 0.5
         self.assertEqual(documents(results), [CHUNKS["v3"][0], CHUNKS["v1"][0]])
+
+    def test_diagnostics_are_off_by_default(self):
+        store, _ = make_store(self.collection)
+
+        results = store.similarity_search("Koliko modula ima informatika?")
+
+        # No extra query, no extra keys: normal searches pay no price.
+        self.assertNotIn("excluded", results)
+        self.assertEqual(self.collection.query_where_log, [vector_store._CURRENT_ONLY_WHERE])
+
+    def test_diagnostics_report_the_chunks_below_the_threshold(self):
+        # SIMILARITY_THRESHOLD 0.85 -> max distance 0.15: v1 (0.10) clears it,
+        # v2 (0.20) and v3 (0.25) do not.
+        store, _ = make_store(self.collection, SIMILARITY_THRESHOLD=0.85)
+
+        results = store.similarity_search("Koliko modula ima informatika?", diagnostics=True)
+
+        excluded = results["excluded"]
+        self.assertEqual(results["excluded_total"], len(excluded))
+        dropped = {c["chunk_id"]: c for c in excluded if c["reason"] == "excluded_threshold"}
+        # The fake store ignores `where` on the wide query, so v1 may show up
+        # here repeating a visible chunk; what matters is that the
+        # over-threshold chunks are reported with their distance and the
+        # threshold that dropped them.
+        self.assertEqual(sorted(dropped), ["v2", "v3"])
+        # 1.0 - 0.85 is 0.15000000000000002 in binary floating point
+        self.assertAlmostEqual(dropped["v3"]["threshold"], 0.15)
+        self.assertEqual(dropped["v3"]["distance"], 0.25)
+        # The visible result is what the threshold allows, unchanged by
+        # diagnostics being on.
+        self.assertEqual(documents(results), [CHUNKS["v1"][0]])
+
+    def test_diagnostics_report_chunks_the_version_policy_dropped(self):
+        store, _ = make_store(self.collection)
+
+        results = store.similarity_search("Koliko modula ima informatika?", diagnostics=True)
+
+        legacy = [c for c in results["excluded"] if c["reason"] == "excluded_legacy_version"]
+        self.assertTrue(legacy)
+        self.assertEqual(legacy[0]["metadata"]["status"], "legacy")
+
+    def test_diagnostics_report_the_reranker_cut(self):
+        store, _ = make_store(self.collection, RERANKER_ENABLED=True, RERANKER_MIN_SCORE=0.5)
+
+        results = store.similarity_search("Koliko modula ima informatika?", diagnostics=True)
+
+        dropped = [c for c in results["excluded"] if c["reason"] == "excluded_reranker"]
+        # v2 scored 0.1, below RERANKER_MIN_SCORE
+        self.assertEqual([c["text"] for c in dropped], [CHUNKS["v2"][0]])
+        self.assertEqual(dropped[0]["rerank_score"], 0.1)
+        self.assertEqual(dropped[0]["rerank_min_score"], 0.5)
+
+    def test_a_question_about_the_old_program_skips_the_wide_diagnostic_query(self):
+        store, _ = make_store(self.collection)
+
+        results = store.similarity_search(
+            "Koliko ESPB je imao Osnovi programiranja po starom programu?", diagnostics=True)
+
+        # The legacy filter was not applied, so there is nothing hidden to
+        # re-query for; the legacy chunk is already visible.
+        self.assertEqual(self.collection.query_where_log, [None])
+        self.assertEqual(
+            [c for c in results["excluded"] if c["reason"] == "excluded_legacy_version"], [])
+
+    def test_a_failing_diagnostic_query_does_not_break_the_search(self):
+        store, _ = make_store(self.collection)  # default threshold: v1, v2 kept
+        original = self.collection.query
+        calls = {"n": 0}
+
+        def flaky(query_embeddings, n_results, where, include):
+            calls["n"] += 1
+            if calls["n"] == 2:  # the diagnostics query
+                raise RuntimeError("chroma hiccup")
+            return original(query_embeddings, n_results, where, include)
+
+        self.collection.query = flaky
+        with self.assertLogs("src.core.vector_store", level="WARNING"):
+            results = store.similarity_search("Koliko modula ima informatika?", diagnostics=True)
+
+        # The failed diagnostic query costs the exclusion list, not the
+        # answer: the visible result is the normal one (v1 and v2 at the
+        # default threshold).
+        self.assertEqual(documents(results), [CHUNKS["v1"][0], CHUNKS["v2"][0]])
+        self.assertIn("excluded", results)
 
     def test_synonyms_expand_the_search_but_not_the_reranker_question(self):
         store, model = make_store(self.collection, QUERY_SYNONYMS=True, RERANKER_ENABLED=True)

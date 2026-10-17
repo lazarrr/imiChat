@@ -26,6 +26,10 @@ class LLMManager:
         self.num_ctx     = getattr(config, "LLM_NUM_CTX", 8192)
         self.base_url = getattr(config, "LLM_OLLAMA_BASE_URL", "http://localhost:11434")
 
+        # Prompt and raw output of the most recent rewrite_query() call, kept
+        # for the request log (see src/api/request_log.py).  None until then.
+        self.last_rewrite: dict | None = None
+
         # Create a persistent client so the connection is reused
         self._client = ollama.Client(host=self.base_url)
 
@@ -112,11 +116,19 @@ class LLMManager:
         information on them") into a standalone question using the last
         1–2 turns of conversation history.
 
-        Only called for questions that refer back to earlier context.  The
-        previous assistant answer is the main reference point for resolving
-        them; the previous user question is used only when the answer does
-        not name what the question refers to.  The answering LLM never sees
-        the history, so the rewrite must name the referenced entities.
+        Only called for questions that refer back to earlier context.  Both
+        the previous user question and the previous assistant answer are
+        usable: the answer names the entities a pronoun refers to, while the
+        previous question carries the topic that elliptical follow-ups
+        ("A koliko traje?") leave out — typically its subject is not repeated
+        in the answer.  The answering LLM never sees the history, so the
+        rewrite must spell out both the entities and the topic.
+
+        ``self.last_rewrite`` keeps the prompt and the raw model output of
+        the most recent call, so the API can log exactly what the rewrite
+        was given (see src/api/request_log.py).  The return value is
+        unchanged: the rewritten question, or ``latest_question`` when the
+        rewrite is unusable.
 
         Uses a short /api/generate call with a small token budget so it's
         near-instant (< 1 s typical).
@@ -124,7 +136,12 @@ class LLMManager:
         The prompt is in Serbian because both the documents and the
         conversation are in Serbian (Latin script).
         """
+        self.last_rewrite = {
+            "prompt": None, "raw_response": None, "returned": None,
+            "history_text": history_text, "latest_question": latest_question,
+        }
         if not history_text.strip():
+            self.last_rewrite["returned"] = latest_question
             return latest_question
 
         prompt = (
@@ -136,20 +153,36 @@ class LLMManager:
             "Najnovije pitanje: "
             f"{latest_question}\n\n"
             "Pravila:\n"
-            "Najnovije pitanje se verovatno oslanja na kontekst prethodnog "
-            "ODGOVORA asistenta (na primer: 'daj mi vise informacija o njima', "
-            "'sta je sa tim', 'pojasni'). Da bi razresio na sta se pitanje "
-            "odnosi, koristi prethodni ODGOVOR asistenta; prethodno pitanje "
-            "korisnika koristi samo ako odgovor ne imenuje pojam na koji se "
-            "pitanje odnosi. Zameni nejasne reci konkretnim pojmovima (npr. "
-            "nazivi modula, predmeta, programa). NE spajaj prethodno pitanje "
-            "sa najnovijim — prethodno pitanje sluzi samo kao kontekst.\n"
+            "Najnovije pitanje se oslanja na kontekst prethodnog razgovora. "
+            "Koristi OBA prethodna elementa: prethodno PITANJE korisnika nosi "
+            "temu i nazive pojmova (predmet, modul, program, dokument), a "
+            "prethodni ODGOVOR asistenta imenuje na sta se odnose zamenice i "
+            "izrazi poput 'njima', 'to', 'taj'. "
+            "Ako je najnovije pitanje elipticno — na primer 'A koliko traje?', "
+            "'A kada?', 'I sta jos?' — ono nasledjuje temu iz prethodnog "
+            "PITANJA, pa u prepisano pitanje ukljuci taj predmet ili pojam iz "
+            "prethodnog pitanja, i onda razresi zamenice pomocu prethodnog "
+            "ODGOVORA. Zameni nejasne reci konkretnim pojmovima (npr. nazivi "
+            "modula, predmeta, programa).\n"
+            "Zadrzi smisao najnovijeg pitanja: ono i posle prepisa mora da "
+            "pita isto sto i pre. Samo zameni nejasne reci konkretnim "
+            "pojmovima i, kod elipticnog pitanja, dodaj pojam iz prethodnog "
+            "pitanja — ne prepisuj prethodno pitanje i ne ubacuj njegove "
+            "druge reci. "
+            "Primer 1: prethodno pitanje 'Koje module ima smer Informatika?', "
+            "odgovor navodi module, najnovije pitanje 'Sta je sa njima?' → "
+            "'Sta je sa modulima Racunarske nauke i Softversko inzenjerstvo?'. "
+            "Primer 2: prethodno pitanje 'Koliko traje master studija?', "
+            "najnovije pitanje 'A koliko kosta?' → 'Koliko kosta master "
+            "studija?'\n"
             "Ako je najnovije pitanje vec razumljivo samo po sebi, vrati ga "
             "nepromenjeno.\n\n"
             "Ne odgovaraj na pitanje. Vrati SAMO prepisano pitanje, nista drugo. "
             "Ne dodaj navodnike, objasnjenja ni komentare. Prepisi ga na srpskom "
             "latinskom pismu."
         )
+
+        self.last_rewrite["prompt"] = prompt
 
         resp = self._client.generate(
             model=self.model,
@@ -161,7 +194,10 @@ class LLMManager:
             stream=False,
         )
         result = resp["response"].strip()
+        self.last_rewrite["raw_response"] = result
         # Guard: if the model returned something nonsensical, fall back
         if not result or len(result) < 3:
+            self.last_rewrite["returned"] = latest_question
             return latest_question
+        self.last_rewrite["returned"] = result
         return result

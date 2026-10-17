@@ -44,17 +44,36 @@ class IdentityTranslator:
         return text
 
 
+# Metadata as the vector store actually holds it, extra keys included.
+CHUNK_META = {
+    "source": "informatika.pdf", "filename": "informatika.pdf",
+    "type": "pdf", "page": 3, "url": "",
+    "llm_processed": False, "llm_original_chars": 830,
+}
+
+EXCLUDED_CHUNK = {
+    "chunk_id": "abc123", "reason": "excluded_threshold", "distance": 0.44,
+    "metadata": {"filename": "stari_plan.pdf", "status": "legacy"},
+    "text": "Stari plan studija.", "threshold": 0.3,
+}
+
+
 def make_system(rewrite=REWRITTEN, translator=None):
     llm = MagicMock()
     llm.rewrite_query.return_value = rewrite
+    # None until rewrite_query() runs; tests that assert on the logged prompt
+    # set it explicitly, like the real LLMManager does.
+    llm.last_rewrite = None
     llm.chat.return_value = "Odgovor."
     llm.chat_stream.side_effect = lambda messages: iter(["Odg", "ovor."])
 
     store = MagicMock()
     store.similarity_search.return_value = {
         "documents": [[CHUNK]],
-        "metadatas": [[{"source": "informatika.pdf", "filename": "informatika.pdf",
-                        "type": "pdf", "page": 3}]],
+        "metadatas": [[dict(CHUNK_META)]],
+        "distances": [[0.21]],
+        "excluded": [dict(EXCLUDED_CHUNK)],
+        "excluded_total": 1,
     }
     qa = UniversityQASystem(llm, store, translator or IdentityTranslator())
     return qa, llm, store
@@ -96,8 +115,10 @@ class QuestionHandlingTests(unittest.TestCase):
         result = qa.query(question, HISTORY)
 
         llm.rewrite_query.assert_not_called()
-        # k=None → the vector store uses TOP_K_RESULTS
-        store.similarity_search.assert_called_once_with(question, k=None)
+        # k=None → the vector store uses TOP_K_RESULTS; diagnostics are only
+        # requested when a trace is being filled in.
+        store.similarity_search.assert_called_once_with(
+            question, k=None, diagnostics=False)
         self.assert_only_question_and_chunks(llm.chat.call_args.args[0], question)
         self.assertEqual(result["answer"], "Odgovor.")
 
@@ -109,6 +130,9 @@ class QuestionHandlingTests(unittest.TestCase):
 
         llm.rewrite_query.assert_called_once()
         history_text, rewritten_from = llm.rewrite_query.call_args.args
+        # The rewrite gets the whole last turn: the question (topic) and
+        # the answer (what "njima" refers to).
+        self.assertIn(PREVIOUS_QUESTION, history_text)
         self.assertIn(PREVIOUS_ANSWER, history_text)
         self.assertEqual(rewritten_from, question)
         self.assertEqual(store.similarity_search.call_args_list[0].args[0], REWRITTEN)
@@ -124,6 +148,29 @@ class QuestionHandlingTests(unittest.TestCase):
 
         llm.rewrite_query.assert_not_called()
         self.assert_only_question_and_chunks(llm.chat.call_args.args[0], question)
+
+    def test_history_for_rewrite_keeps_the_previous_question_whole(self):
+        # The previous question is what names the topic, so it survives
+        # longer than the 400-char cap older answers get.
+        long_question = "a" * 700
+        history = [
+            {"role": "user", "content": long_question},
+            {"role": "assistant", "content": PREVIOUS_ANSWER},
+            {"role": "user", "content": "A koliko traje?"},
+        ]
+
+        text = UniversityQASystem._format_history_for_rewrite(history)
+
+        self.assertIn(f"Korisnik: {long_question[:500]}...", text)
+        self.assertNotIn(long_question, text)
+        self.assertIn(f"Asistent: {PREVIOUS_ANSWER}", text)
+        self.assertTrue(text.endswith("Korisnik: A koliko traje?"))
+
+    def test_history_for_rewrite_keeps_a_short_previous_question_verbatim(self):
+        text = UniversityQASystem._format_history_for_rewrite(HISTORY)
+
+        self.assertIn(f"Korisnik: {PREVIOUS_QUESTION}", text)
+        self.assertNotIn("...", text)
 
     def test_stream_sends_only_rewritten_question_and_chunks(self):
         qa, llm, _ = make_system()
@@ -148,7 +195,7 @@ class QuestionHandlingTests(unittest.TestCase):
 
         self.assert_only_question_and_chunks(llm.chat.call_args.args[0], "A o njima?")
 
-    def test_unclear_question_with_no_results_falls_back_to_last_answer(self):
+    def test_unclear_question_falls_back_to_previous_question_then_answer(self):
         qa, llm, store = make_system()
         hit = store.similarity_search.return_value
         empty = {"documents": [[]], "metadatas": [[]]}
@@ -157,9 +204,24 @@ class QuestionHandlingTests(unittest.TestCase):
         qa.query("Daj mi više informacija o njima", HISTORY)
 
         queries = [c.args[0] for c in store.similarity_search.call_args_list]
+        self.assertEqual(len(queries), 3)
         self.assertEqual(queries[:2], [REWRITTEN, "Daj mi više informacija o njima"])
-        self.assertTrue(queries[2].startswith(PREVIOUS_ANSWER))
+        self.assertEqual(queries[2], f"{PREVIOUS_QUESTION} Daj mi više informacija o njima")
         # Retrieval may use the history, the answering LLM still does not.
+        self.assert_only_question_and_chunks(llm.chat.call_args.args[0], REWRITTEN)
+
+    def test_last_answer_fallback_is_used_when_the_previous_question_fails(self):
+        qa, llm, store = make_system()
+        hit = store.similarity_search.return_value
+        empty = {"documents": [[]], "metadatas": [[]]}
+        store.similarity_search.side_effect = [empty, empty, empty, hit]
+
+        qa.query("Daj mi više informacija o njima", HISTORY)
+
+        queries = [c.args[0] for c in store.similarity_search.call_args_list]
+        self.assertEqual(len(queries), 4)
+        self.assertEqual(queries[2], f"{PREVIOUS_QUESTION} Daj mi više informacija o njima")
+        self.assertTrue(queries[3].startswith(PREVIOUS_ANSWER))
         self.assert_only_question_and_chunks(llm.chat.call_args.args[0], REWRITTEN)
 
     def test_clear_question_with_no_results_does_not_use_history(self):
@@ -186,7 +248,7 @@ class EventLoopTests(unittest.TestCase):
             on_loop["rewrite"] = on_event_loop()
             return REWRITTEN
 
-        def search(query, k=None):
+        def search(query, k=None, diagnostics=False):
             on_loop["search"] = on_event_loop()
             return hit
 
@@ -223,6 +285,200 @@ class EventLoopTests(unittest.TestCase):
 
         for tokens in asyncio.run(two_requests()):
             self.assertEqual(tokens[0], "Odgovor.")
+
+
+class TraceTests(unittest.TestCase):
+    """The pipeline trace is what the request log is built from, so the
+    chain must fill in the rewrite, every retrieval attempt and the prompt."""
+
+    def test_trace_records_rewrite_retrieval_and_prompt(self):
+        qa, llm, store = make_system()
+        llm.last_rewrite = {
+            "prompt": "PROMPT SA ISTORIJOM",
+            "raw_response": REWRITTEN,
+            "history_text": f"Korisnik: {PREVIOUS_QUESTION}\nAsistent: {PREVIOUS_ANSWER}",
+            "latest_question": "Daj mi više informacija o njima",
+        }
+        trace = {}
+
+        result = qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        self.assertEqual(trace["rewrite"]["question_in"], "Daj mi više informacija o njima")
+        self.assertEqual(trace["rewrite"]["question_out"], REWRITTEN)
+        self.assertEqual(trace["rewrite"]["prompt"], "PROMPT SA ISTORIJOM")
+        self.assertEqual(trace["rewrite"]["result"], "accepted")
+        self.assertTrue(trace["rewrite"]["changed"])
+        self.assertIn(PREVIOUS_ANSWER, trace["rewrite"]["history_text"])
+
+        self.assertEqual(trace["search_question"], REWRITTEN)
+        self.assertTrue(trace["unclear"])
+        self.assertEqual(trace["retrieval"]["winning_strategy"], "search_question")
+        self.assertEqual(trace["retrieval"]["attempts"], [{
+            "rank": 1, "strategy": "search_question", "query": REWRITTEN,
+            "query_chars": len(REWRITTEN), "hits": 1, "top_distance": 0.21,
+            "excluded": 1,
+        }])
+
+        self.assertEqual(len(trace["chunks"]), 1)
+        self.assertEqual(trace["chunks"][0]["filename"], "informatika.pdf")
+        self.assertEqual(trace["chunks"][0]["text"], CHUNK)
+        self.assertEqual(trace["chunks"][0]["rank"], 1)
+        # Every metadata field the vector store holds is kept, including the
+        # ones this project never looks at.
+        self.assertEqual(trace["chunks"][0]["metadata"]["llm_original_chars"], 830)
+        self.assertEqual(trace["chunks"][0]["metadata"], CHUNK_META)
+
+        # The prompt recorded is exactly what the model got.
+        self.assertEqual(trace["prompt"]["messages"], llm.chat.call_args.args[0])
+        self.assertIn(CHUNK, trace["prompt"]["messages"][1]["content"])
+        # Both entry points record the citation lines the answer carried.
+        self.assertEqual(trace["sources"], ["[1] informatika.pdf — strana 3"])
+        self.assertIn("rewrite", trace["timings_ms"])
+        self.assertIn("retrieval", trace["timings_ms"])
+        self.assertIn("answer", trace["timings_ms"])
+        self.assertEqual(result["answer"], "Odgovor.")
+
+    def test_trace_records_a_clear_question_as_skipped(self):
+        qa, _, _ = make_system()
+        trace = {}
+
+        qa.query("Koliko ESPB ima Uvod u programiranje?", HISTORY, trace=trace)
+
+        self.assertEqual(trace["rewrite"]["result"], "skipped_clear_question")
+        self.assertFalse(trace["rewrite"]["changed"])
+        self.assertIsNone(trace["rewrite"]["prompt"])
+        self.assertIsNone(trace["rewrite"]["matched_pattern"])
+        self.assertFalse(trace["unclear"])
+        self.assertEqual(trace["search_question"], "Koliko ESPB ima Uvod u programiranje?")
+
+    def test_trace_records_rejected_rewrite_with_the_guard(self):
+        qa, _, _ = make_system(rewrite="")
+        trace = {}
+
+        qa.query("A o njima?", HISTORY, trace=trace)
+
+        self.assertEqual(trace["rewrite"]["result"], "empty")
+        self.assertEqual(trace["rewrite"]["question_out"], "A o njima?")
+        self.assertFalse(trace["rewrite"]["changed"])
+        self.assertEqual(trace["rewrite"]["rejected"], "")
+
+    def test_trace_records_every_failed_retrieval_attempt(self):
+        qa, llm, store = make_system()
+        llm.last_rewrite = {"prompt": "P", "raw_response": REWRITTEN,
+                            "history_text": "h", "latest_question": "q"}
+        empty = {"documents": [[]], "metadatas": [[]]}
+        store.similarity_search.side_effect = [
+            empty, empty, empty, store.similarity_search.return_value,
+        ]
+        trace = {}
+
+        qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        attempts = trace["retrieval"]["attempts"]
+        self.assertEqual([a["strategy"] for a in attempts], [
+            "search_question", "original_question",
+            "previous_question_plus_current", "previous_answer_plus_current",
+        ])
+        self.assertEqual([a["hits"] for a in attempts], [0, 0, 0, 1])
+        self.assertEqual([a["rank"] for a in attempts], [1, 2, 3, 4])
+        self.assertEqual(trace["retrieval"]["winning_strategy"],
+                         "previous_answer_plus_current")
+
+    def test_trace_keeps_the_chunks_that_were_not_used(self):
+        # The store reports what it dropped (threshold, legacy, reranker…);
+        # the trace must carry it, tagged with the attempt that produced it.
+        qa, llm, store = make_system()
+
+        trace = {}
+        qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        excluded = trace["retrieval"]["excluded"]
+        self.assertEqual(len(excluded), 1)
+        self.assertEqual(excluded[0]["reason"], "excluded_threshold")
+        self.assertEqual(excluded[0]["metadata"]["status"], "legacy")
+        self.assertEqual(excluded[0]["attempt_rank"], 1)
+        self.assertEqual(excluded[0]["attempt_strategy"], "search_question")
+        # The winning attempt owns the exclusions that matter for the answer.
+        self.assertTrue(excluded[0]["attempt_kept"])
+        self.assertEqual(trace["chunks_excluded"][0]["chunk_id"], "abc123")
+        self.assertEqual(trace["chunks_excluded_total"], 1)
+
+    def test_diagnostics_are_only_requested_when_tracing(self):
+        qa, _, store = make_system()
+        trace = {}
+
+        qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        self.assertTrue(store.similarity_search.call_args.kwargs["diagnostics"])
+
+    def test_exclusions_from_a_losing_attempt_are_marked_as_such(self):
+        qa, _, store = make_system()
+        empty = {"documents": [[]], "metadatas": [[]], "distances": [[]],
+                 "excluded": [{**EXCLUDED_CHUNK, "reason": "excluded_legacy_version"}],
+                 "excluded_total": 1}
+        store.similarity_search.side_effect = [empty, store.similarity_search.return_value]
+        trace = {}
+
+        qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        excluded = trace["retrieval"]["excluded"]
+        self.assertEqual(len(excluded), 2)
+        # Attempt 1 found nothing; its exclusions belong to a dead query.
+        self.assertEqual(excluded[0]["attempt_rank"], 1)
+        self.assertFalse(excluded[0]["attempt_kept"])
+        # Attempt 2 answered the question.
+        self.assertEqual(excluded[1]["attempt_rank"], 2)
+        self.assertTrue(excluded[1]["attempt_kept"])
+        self.assertEqual(trace["retrieval"]["excluded_total"], 2)
+
+    def test_a_store_without_diagnostics_still_works(self):
+        # An older/other vector store returning only documents+metadatas.
+        qa, _, store = make_system()
+        store.similarity_search.return_value = {
+            "documents": [[CHUNK]], "metadatas": [[dict(CHUNK_META)]],
+        }
+        trace = {}
+
+        result = qa.query("Daj mi više informacija o njima", HISTORY, trace=trace)
+
+        self.assertEqual(result["answer"], "Odgovor.")
+        self.assertEqual(trace["chunks"][0]["distance"], None)
+        self.assertNotIn("excluded", trace.get("retrieval", {}))
+
+    def test_stream_trace_is_complete_after_the_stream_ends(self):
+        qa, llm, _ = make_system()
+        trace = {}
+
+        collect(qa.query_stream("Daj mi više informacija o njima", HISTORY, trace))
+
+        self.assertEqual(trace["search_question"], REWRITTEN)
+        self.assertEqual(trace["rewrite"]["question_out"], REWRITTEN)
+        self.assertEqual(trace["sources"], ["[1] informatika.pdf — strana 3"])
+        # Written by query_stream's finally block, once the last token is out.
+        self.assertIn("total", trace["timings_ms"])
+
+    def test_stream_trace_survives_a_client_that_stops_reading(self):
+        qa, llm, _ = make_system()
+        trace = {}
+
+        async def stop_after_first_token():
+            stream = qa.query_stream("Daj mi više informacija o njima", HISTORY, trace)
+            first = await stream.__anext__()
+            await stream.aclose()  # client hung up
+            return first
+
+        self.assertEqual(asyncio.run(stop_after_first_token()), "Odg")
+        # Whatever did run is still logged, so the turn is diagnosable.
+        self.assertEqual(trace["search_question"], REWRITTEN)
+        self.assertEqual(trace["rewrite"]["result"], "accepted")
+        self.assertIn("total", trace["timings_ms"])
+
+    def test_trace_is_optional_and_does_not_change_the_answer(self):
+        qa, _, _ = make_system()
+
+        result = qa.query("Daj mi više informacija o njima", HISTORY)
+
+        self.assertEqual(result["answer"], "Odgovor.")
 
 
 class SourceNumberingTests(unittest.TestCase):

@@ -235,7 +235,10 @@ curl -X POST http://localhost:8000/chat/stream \
 1. Detects an unclear follow-up: the question contains a reference word
    (`njega`) and session `abc123` has history.
 2. Calls Llama 3.1 to rewrite `"Koji su preduslovi za njega?"` →
-   `"Koji su preduslovi za Uvod u programiranje?"`.
+   `"Koji su preduslovi za Uvod u programiranje?"`. The rewrite prompt gets
+   the last 1–2 turns and is told to use **both** the previous user question
+   (topic and entity names) and the previous assistant answer (what the
+   pronoun refers to).
 3. Embeds the **rewritten** question (with `query: ` prefix) and
    retrieves relevant chunks from ChromaDB.
 4. Sends **only** the system prompt + retrieved chunks + rewritten question
@@ -308,8 +311,10 @@ Omitting these prefixes **degrades retrieval quality significantly**.
 ### Multi-turn conversation (v2)
 
 1. **History is never sent to the answering LLM** — every answer call is `[system, user("Kontekst: <chunks> … Pitanje: <question>")]` via `/api/chat`, so old answers (e.g. one still citing an outdated program) cannot leak into new ones.
-2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
-3. **Explicit context window** — `num_ctx=8192` is set on every Ollama call.
+2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewrite prompt (`LLMManager.rewrite_query`) is fed the whole previous turn and told to use both parts: the previous **question** supplies the topic and entity names, the previous **answer** supplies what the pronoun points at; an elliptical follow-up (`"A koliko traje?"`, `"I šta još?"`) inherits the previous question's subject. The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
+3. **Retrieval fallbacks use the history (unclear follow-ups only)** — if the rewritten query returns nothing, the search is retried in order with the original question, then `previous question + current question`, then `last answer + current question`. A clear question never falls back to history.
+4. **Explicit context window** — `num_ctx=8192` is set on every Ollama call.
+5. **Every turn is traced to `logs/requests.jsonl`** — one JSON object per answered turn, written by the API after the answer streams (`src/api/request_log.py`). It holds the question as typed, the history text the rewrite saw, the full rewrite prompt and raw model output with the guard that accepted or rejected it, every retrieval query tried with hit counts, the chunks sent to the LLM **with their whole vector-store metadata**, the chunks retrieval dropped with the reason and search attempt that dropped them, the exact prompt, the answer with sources, and per-stage timings. Dropped chunks are collected by `similarity_search(..., diagnostics=True)` — an extra Chroma query without the current-version filter, run only when the request is being logged, so it never changes the visible result or costs anything in normal operation. A failure is logged too (`failed: true`), including a client that hung up mid-answer. The chain fills in a `trace` dict passed by the API and never writes files itself; a separate visualization project reads the file.
 
 ### Study-program versions (old vs new program)
 

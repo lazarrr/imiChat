@@ -49,5 +49,28 @@ class ContextWindowTests(unittest.TestCase):
         self.assertEqual({call.kwargs["options"]["num_ctx"] for call in calls}, {8192})
 
 
+@unittest.skipIf(llm_manager is None, "ollama not installed")
+class RewritePromptTests(unittest.TestCase):
+    def test_rewrite_prompt_uses_previous_question_and_answer(self):
+        manager, client = make_manager()
+        client.generate.return_value = {"response": "Koji su preduslovi za Uvod u programiranje?"}
+        history = (
+            "Korisnik: Koliko ESPB ima Uvod u programiranje?\n"
+            "Asistent: Uvod u programiranje nosi 6 ESPB bodova."
+        )
+
+        manager.rewrite_query(history, "Koji su preduslovi za njega?")
+
+        prompt = client.generate.call_args.kwargs["prompt"]
+        self.assertIn(history, prompt)
+        self.assertIn("Koji su preduslovi za njega?", prompt)
+        # Both parts of the previous turn are named as usable context, and
+        # elliptical follow-ups inherit the topic from the previous question.
+        self.assertIn("prethodno PITANJE", prompt)
+        self.assertIn("prethodni ODGOVOR", prompt)
+        self.assertIn("elipticno", prompt)
+        self.assertIn("nazivi modula, predmeta, programa", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
