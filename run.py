@@ -90,7 +90,12 @@ def eval_retrieval(args):
     print(f"{len(cases)} golden question(s) from {path}")
 
     vector_store = VectorStoreManager(settings)
-    k = args.k or settings.TOP_K_RESULTS
+    # The store clamps every search to MAX_CONTEXT_CHUNKS; report the k that
+    # is actually used so hit@k is not mislabelled.
+    k = min(
+        args.k or settings.TOP_K_RESULTS,
+        getattr(settings, "MAX_CONTEXT_CHUNKS", 4),
+    )
     if args.compare:
         print_comparison(vector_store, cases, k)
     else:

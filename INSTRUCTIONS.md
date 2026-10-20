@@ -115,8 +115,9 @@ via environment variables or a `.env` file.
 | `LLM_NUM_CTX` | `8192` | Local Ollama context window (tokens) |
 | `LLM_REPEAT_PENALTY` / `LLM_REPEAT_LAST_N` | `1.2` / `256` | Loop guard; remote uses `frequency_penalty = repeat_penalty - 1` |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
-| `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
-| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy drops legacy / duplicate chunks |
+| `TOP_K_RESULTS` | `3` | Chunks sent to the model per question (deliberately below 5) |
+| `MAX_CONTEXT_CHUNKS` | `4` | Hard ceiling; a larger `TOP_K_RESULTS` or `run.py eval -k` cannot exceed it |
+| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy drops other versions / duplicates |
 | `QUERY_SYNONYMS` | `false` | Better retrieval (§8): add official terms for student wording (`SYNONYMS_FILE`, default `config/synonyms.txt`) |
 | `HYBRID_SEARCH` | `false` | Better retrieval (§8): fuse BM25 keyword search with vector search |
 | `RERANKER_ENABLED` | `false` | Better retrieval (§8): re-score candidates with `RERANKER_MODEL` (default `BAAI/bge-reranker-v2-m3`) on `RERANKER_DEVICE` (`cpu` / `cuda`) |
@@ -347,20 +348,35 @@ Omitting these prefixes **degrades retrieval quality significantly**.
 2. **Unclear follow-ups are rewritten** — only questions with a reference word (`njih`, `o njima`, `njega`, `to`/`taj`/`tome`, `više o …`, `malo više?`, or starting with `A …`/`I …`; see `_UNCLEAR_PATTERNS` in `qa_chain.py`) are rewritten from the last 1–2 turns into a standalone question (e.g. `"Koji su preduslovi za njega?"` → `"Koji su preduslovi za Uvod u programiranje?"`). The rewrite prompt (`QUERY_REWRITE_PROMPT` in `llm_manager.py`) is fed the last 1–2 turns — the previous **question** supplies the topic and entity names, the previous **answer** supplies what the pronoun points at — and follows an explicit rule set: never answer, resolve references from the history, preserve the user's intent, add no facts, keep an already standalone question unchanged, ignore the history for an unrelated new topic, and return only the standalone question. The rewritten question is used for retrieval **and** is the question the LLM answers. Every other question is used exactly as typed — a bare `"Koliko ESPB?"` is treated as a new question.
 3. **Retrieval fallbacks use the history (unclear follow-ups only)** — if the rewritten query returns nothing, the search is retried in order with the original question, then `previous question + current question`, then `last answer + current question`. A clear question never falls back to history.
 4. **Explicit context window** — `num_ctx=8192` is set on every local Ollama call (the remote endpoint manages its own context).
-5. **Every turn is traced to `logs/requests.jsonl`** — one JSON object per answered turn, written by the API after the answer streams (`src/api/request_log.py`). It holds the question as typed, the history text the rewrite saw, the full rewrite prompt and raw model output with the guard that accepted or rejected it, every retrieval query tried with hit counts, the chunks sent to the LLM **with their whole vector-store metadata**, the chunks retrieval dropped with the reason and search attempt that dropped them, the exact prompt, the answer with sources, and per-stage timings. Dropped chunks are collected by `similarity_search(..., diagnostics=True)` — an extra Chroma query without the current-version filter, run only when the request is being logged, so it never changes the visible result or costs anything in normal operation. A failure is logged too (`failed: true`), including a client that hung up mid-answer. The chain fills in a `trace` dict passed by the API and never writes files itself; a separate visualization project reads the file.
+5. **Every turn is traced to `logs/requests.jsonl`** — one JSON object per answered turn, written by the API after the answer streams (`src/api/request_log.py`). It holds the question as typed, the history text the rewrite saw, the full rewrite prompt and raw model output with the guard that accepted or rejected it, every retrieval query tried with hit counts, the chunks sent to the LLM **with their whole vector-store metadata**, the chunks retrieval dropped with the reason and search attempt that dropped them, the exact prompt, the answer with sources, and per-stage timings. Dropped chunks are collected by `similarity_search(..., diagnostics=True)` — an extra Chroma query without the version filter, run only when the request is being logged, so it never changes the visible result or costs anything in normal operation. A failure is logged too (`failed: true`), including a client that hung up mid-answer. The chain fills in a `trace` dict passed by the API and never writes files itself; a separate visualization project reads the file.
 
 ### Study-program versions (old vs new program)
 
 Program pages hold several versions of the same program (e.g. Informatika
 OAS 2026 with 2 modules and 2019 with 3 modules).  The scraper labels every
 chunk (`version_label`, `accreditation_year`, `status`) and puts the label in
-the chunk header the LLM sees.  The scraper's DeepSeek check also flags
-unversioned text that contradicts the current program facts (e.g. an FAQ
-still saying "3 smera") with `outdated: true`.
-`VectorStoreManager._apply_version_policy` drops `status == "legacy"` and
-`outdated` chunks unless the question names an old year (2000–2018) or
-"stari program", and collapses duplicates (`dedup_key`); the system prompt
-tells the LLM to say which version each fact belongs to.
+the chunk header the LLM sees.  The statuses are `enrolling` (current,
+enrollment open), `phase_out` (previous, earlier students still study it),
+`upcoming` (the "future" status — enrollment has not started) and `legacy`.
+The scraper's DeepSeek check also flags unversioned text that contradicts the
+current program facts (e.g. an FAQ still saying "3 smera") with
+`outdated: true`.
+
+`src/core/version_filter.py` derives the filter from the question:
+
+* no year, or the current enrollment year → `enrolling` + version-agnostic
+  chunks (the default);
+* an older year (`2019`, `akreditacija 2011`) → that historical version;
+* a future year (`upis 2027/28`) → that `upcoming` version;
+* `stari program` / `prethodni program` → all `legacy` / `phase_out` versions.
+
+The same predicate is used inside the Chroma query and for keyword/reranked
+candidates; `outdated` chunks are always dropped.  `_apply_version_policy`
+also collapses duplicates (`dedup_key`) and keeps at most `TOP_K_RESULTS`
+chunks (never more than `MAX_CONTEXT_CHUNKS`), and the system prompt tells
+the LLM to say which version each fact belongs to.  If the index predates the
+version metadata, retrieval retries with a wider filter instead of returning
+nothing.
 
 ### Better retrieval (optional)
 

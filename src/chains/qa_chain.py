@@ -540,7 +540,8 @@ class UniversityQASystem:
     ) -> tuple[list[str], list[dict], list]:
         """
         Normalize the query (Cyrillic → Latin) and run a similarity search.
-        ``k=None`` lets the vector store use TOP_K_RESULTS.
+        ``k=None`` lets the vector store use TOP_K_RESULTS (clamped to
+        MAX_CONTEXT_CHUNKS).
 
         Returns ``(documents, metadatas, distances)``.  With ``trace``, the
         attempt is appended to ``trace['retrieval']['attempts']`` — including
@@ -709,7 +710,8 @@ class UniversityQASystem:
             Used only to rewrite unclear follow-up questions — it is never
             sent to the answering LLM.
         k : int | None
-            Number of chunks to retrieve (default: TOP_K_RESULTS).
+            Number of chunks to retrieve (default: TOP_K_RESULTS, never more
+            than MAX_CONTEXT_CHUNKS).
         trace : dict | None
             Optional dict filled with the pipeline trace — the rewrite, every
             retrieval attempt, the chunks and the prompt sent to the model

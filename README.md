@@ -181,10 +181,11 @@ environment variables or a `.env` file (see `.env.example`).
 | `EMBEDDING_MODEL` | `intfloat/multilingual-e5-large` | Embedding model |
 | `VECTOR_DB_PATH` | `./data/vector_store` | Shared ChromaDB path (filled by the scraper project) |
 | `CHROMA_COLLECTION` | `university_knowledge` | Collection to read (e.g. `university_knowledge_test`) |
-| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before legacy versions / duplicates are dropped |
+| `RETRIEVAL_FETCH_K` | `20` | Candidates fetched before the version policy / duplicates are dropped |
 | `CHUNK_SIZE` | `1000` | Characters per chunk |
 | `CHUNK_OVERLAP` | `200` | Overlap between chunks |
-| `TOP_K_RESULTS` | `5` | Chunks retrieved per query |
+| `TOP_K_RESULTS` | `3` | Chunks sent to the model per question — deliberately below 5 |
+| `MAX_CONTEXT_CHUNKS` | `4` | Hard ceiling; even a larger `TOP_K_RESULTS` or `run.py eval -k` cannot exceed it |
 | `SIMILARITY_THRESHOLD` | `0.7` | Cosine similarity cutoff |
 | `QUERY_SYNONYMS` | `false` | Better retrieval: add official terms for student wording (`SYNONYMS_FILE`, default `config/synonyms.txt`) |
 | `HYBRID_SEARCH` | `false` | Better retrieval: fuse BM25 keyword search with vector search |
@@ -220,7 +221,7 @@ Each line answers "what did the system actually search for, and why?":
 | `rewrite.prompt`, `.raw_response`, `.result`, `.matched_pattern` | The full rewrite prompt, the model's raw output, and the guard that accepted or rejected it (`accepted`, `empty`, `too_short`, `too_long`, `unchanged`, `skipped_clear_question`, `skipped_no_history`) — with `rejected` holding the discarded candidate |
 | `retrieval.attempts`, `.winning_strategy` | Every query tried in order with its hit count and top distance, including the ones that found nothing |
 | `chunks` | The chunks that went into the prompt, with source, page, distance, body and **the whole vector-store metadata dict** (`metadata`) — every field, including ones the chatbot does not use |
-| `chunks_excluded` | Chunks that were retrieved but rejected before the prompt, each with its `reason` (below the similarity threshold, previous program version, outdated, duplicate, reranker, did not fit in top-k), its metadata, its text and the search attempt that produced it. Capped at `REQUEST_LOG_MAX_EXCLUDED`; `chunks_excluded_total` always holds the real count |
+| `chunks_excluded` | Chunks that were retrieved but rejected before the prompt, each with its `reason` (below the similarity threshold, a different program version, outdated, duplicate, reranker, did not fit in top-k), its metadata, its text and the search attempt that produced it. Capped at `REQUEST_LOG_MAX_EXCLUDED`; `chunks_excluded_total` always holds the real count |
 | `prompt.user_content` | The exact message sent to the answering model (no history) |
 | `answer.text`, `.sources` | The model's answer and the rendered `Izvori` block |
 | `timings_ms` | Per stage: `rewrite`, `retrieval`, `answer`, `total` |
@@ -236,6 +237,32 @@ every record; readers should ignore unknown keys.
 tail -n 1 logs/requests.jsonl | python -m json.tool
 ```
 
+## Program versions (old vs new)
+
+The scraper labels every chunk from a program page with `version_label`,
+`accreditation_year` and `status`, and leaves those fields off version-agnostic
+content (general info, FAQ). The statuses are:
+
+| Status | Meaning | Retrieved when |
+|---|---|---|
+| `enrolling` | current program, enrollment open | **default** |
+| `phase_out` | old program, earlier students still study it | the question names its year, or "stari program" |
+| `upcoming` | new program, enrollment has not started yet | the question names a future year |
+| `legacy` | program no longer studied | the question names its year, or "stari program" |
+
+`src/core/version_filter.py` turns the question into that filter:
+
+* no year, or the current year → current (`enrolling`) + version-agnostic chunks;
+* an older year (e.g. `2019`, `akreditacija 2011`) → that historical version;
+* a future year (e.g. `upis 2027/28`) → that `upcoming` version;
+* `stari program`, `prethodni program` → all `legacy` / `phase_out` versions.
+
+The same rule is applied inside the Chroma query and to keyword/reranked
+candidates. Chunks flagged `outdated: true` (unversioned text that contradicts
+the reviewed current facts, e.g. an FAQ still saying "3 smera") are always
+dropped. If an older index has no version metadata, retrieval falls back to a
+wider query instead of returning nothing.
+
 ## Better retrieval (optional)
 
 Three retrieval steps can each be switched on or off in `.env`. All three are
@@ -245,7 +272,7 @@ off by default, so retrieval is the plain vector search unless you enable them:
 |---|---|---|
 | `QUERY_SYNONYMS=true` | Adds official terms for student wording before searching (`smerovi` → also `modul`, `OAS` → `osnovne akademske studije`). Edit `config/synonyms.txt` to add your own. | none |
 | `HYBRID_SEARCH=true` | Adds BM25 keyword search to the vector search and merges both rankings. Finds exact names, codes and numbers that embeddings miss. | builds a keyword index in memory on the first question |
-| `RERANKER_ENABLED=true` | A cross-encoder reads the question together with each of the `RETRIEVAL_FETCH_K` candidates and keeps the best `TOP_K_RESULTS`. `RERANKER_MIN_SCORE` can also drop weak chunks, which lets the bot say "nemam informaciju" instead of answering from loosely related text. | ~2.3 GB model download; a few seconds per question on CPU (`RERANKER_DEVICE=cuda` if you have a GPU) |
+| `RERANKER_ENABLED=true` | A cross-encoder reads the question together with each of the `RETRIEVAL_FETCH_K` candidates and keeps the best `TOP_K_RESULTS` (never more than `MAX_CONTEXT_CHUNKS`). `RERANKER_MIN_SCORE` can also drop weak chunks, which lets the bot say "nemam informaciju" instead of answering from loosely related text. | ~2.3 GB model download; a few seconds per question on CPU (`RERANKER_DEVICE=cuda` if you have a GPU) |
 
 Compare them on the golden questions (the scraper's `eval_questions.yaml`)
 before switching them on:

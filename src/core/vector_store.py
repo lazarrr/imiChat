@@ -17,7 +17,6 @@ similarity_search().
 """
 
 import os
-import re
 import hashlib
 import logging
 import threading
@@ -33,29 +32,23 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from src.processing.document_loader import DocumentProcessor
 from src.core.keyword_search import BM25Index, SynonymExpander, reciprocal_rank_fusion
 from src.core.reranker import Reranker
+from src.core.version_filter import (
+    CURRENT_ONLY_WHERE,
+    VersionIntent,
+)
 
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# A question asks about an OLD program version if it names a year
-# 2000–2018 or says "stari program", "stara akreditacija", …
-_LEGACY_QUERY_RE = re.compile(
-    r"\b20(0\d|1[0-8])\b"
-    r"|\bstar(i|og|om|im|ih|e|a|u)\s+(studijsk\w+\s+)?(program\w*|akreditacij\w*|plan\w*)"
-    r"|\bprethodn\w+\s+akreditacij\w*",
-    re.IGNORECASE,
-)
-
-# Applied inside the Chroma query (legacy program tables are about half of
-# all chunks and would crowd current content out of the candidates).
-# $ne also keeps chunks that do not have the key at all.
-_CURRENT_ONLY_WHERE = {"$and": [{"status": {"$ne": "legacy"}}, {"outdated": {"$ne": True}}]}
+# Backwards-compatible names: the current-version filter and predicate are
+# now provided by version_filter.VersionIntent.
+_CURRENT_ONLY_WHERE = CURRENT_ONLY_WHERE
 
 
 def _is_current(meta: dict) -> bool:
-    """_CURRENT_ONLY_WHERE for chunks found outside Chroma (keyword search)."""
-    return meta.get("status") != "legacy" and meta.get("outdated") is not True
+    """True if a chunk belongs to the current (enrolling) program version."""
+    return VersionIntent.current().matches(meta)
 
 
 class VectorStoreManager:
@@ -74,7 +67,10 @@ class VectorStoreManager:
             settings=ChromaSettings(anonymized_telemetry=False),
         )
         self.collection_name = getattr(config, "CHROMA_COLLECTION", "university_knowledge")
-        self.top_k   = getattr(config, "TOP_K_RESULTS", 5)
+        self.top_k   = getattr(config, "TOP_K_RESULTS", 3)
+        self.max_context_chunks = max(
+            1, int(getattr(config, "MAX_CONTEXT_CHUNKS", 4))
+        )
         self.fetch_k = getattr(config, "RETRIEVAL_FETCH_K", 20)
         self.text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=config.CHUNK_SIZE,
@@ -216,18 +212,32 @@ class VectorStoreManager:
     ) -> dict:
         """
         Search the collection and return the best k chunks (k defaults to
-        TOP_K_RESULTS).
+        TOP_K_RESULTS and is never larger than MAX_CONTEXT_CHUNKS, so the
+        model gets fewer than five chunks per question).
 
         Always: RETRIEVAL_FETCH_K vector-search candidates filtered by
         SIMILARITY_THRESHOLD (ChromaDB distances are cosine distances, so a
         similarity of 0.7 maps to a maximum allowed distance of 0.3), then
-        the version policy (legacy program versions and duplicates
-        removed) keeps the best k.
+        the version policy (the program version the question asks about,
+        plus duplicates removed) keeps the best k.
+
+        The version policy is driven by the question (see
+        src/core/version_filter.py):
+          • no year / "aktuelni"      → current program (status enrolling),
+                                        version-agnostic chunks included
+          • an older year             → that historical version
+                                        (status phase_out or legacy)
+          • a future year             → that upcoming version
+                                        (status upcoming)
+          • "stari program"           → all legacy/phase_out versions
+        ``outdated`` chunks are always dropped: they contradict the reviewed
+        current facts, whatever year the question names.
 
         Optional steps, each switched on in config:
           QUERY_SYNONYMS    search with official terms added to the query
           HYBRID_SEARCH     fuse BM25 keyword hits with the vector hits
-                            (reciprocal rank fusion)
+                            (reciprocal rank fusion); keyword hits pass the
+                            same version predicate
           RERANKER_ENABLED  the version policy keeps RETRIEVAL_FETCH_K
                             candidates; a cross-encoder scores them against
                             the question and the best k are kept (none
@@ -238,17 +248,19 @@ class VectorStoreManager:
         ``diagnostics=True`` additionally reports the chunks that were
         retrieved but did **not** make it into the result, with the reason
         each one was dropped (``results["excluded"]``, ``results["excluded_total"]``).
-        It costs one extra Chroma query without the current-version filter,
-        so it is off by default and only the request log turns it on.  The
-        visible result is identical either way.
+        It costs one extra Chroma query without the version filter, so it is
+        off by default and only the request log turns it on.  The visible
+        result is identical either way.
         """
+        limit = min(k or self.top_k, self.max_context_chunks)
         with self._search_lock:
-            return self._search(query, k or self.top_k, diagnostics=diagnostics)
+            return self._search(query, limit, diagnostics=diagnostics)
 
     def _search(self, query: str, k: int, diagnostics: bool = False) -> dict:
         """similarity_search() itself, run while holding _search_lock."""
         collection = self.client.get_collection(self.collection_name)
-        wants_old = bool(_LEGACY_QUERY_RE.search(query or ""))
+        intent = VersionIntent.from_query(query)
+        logger.info("Version filter: %s", intent.describe())
         # Chunks dropped on the way to the final k: reason, text, metadata,
         # distance.  Only filled in when diagnostics are requested.
         excluded: list[dict] = []
@@ -274,17 +286,37 @@ class VectorStoreManager:
         # Use the query prefix — this is critical for E5 retrieval quality
         query_embedding = self.create_embeddings([search_query], is_query=True)[0]
 
-        results = collection.query(
-            query_embeddings=[query_embedding.tolist()],
-            n_results=max(k, self.fetch_k),
-            where=None if wants_old else _CURRENT_ONLY_WHERE,
-            include=["documents", "metadatas", "distances"],
-        )
+        def query_chroma(where):
+            return collection.query(
+                query_embeddings=[query_embedding.tolist()],
+                n_results=max(k, self.fetch_k),
+                where=where,
+                include=["documents", "metadatas", "distances"],
+            )
 
-        # Re-query without the current-version filter, to see what that filter
-        # hid: chunks with status="legacy" / outdated=true never appear in
-        # `results`, so they can only be reported from a second query.
-        if diagnostics and not wants_old:
+        where = intent.where()
+        results = query_chroma(where)
+        relaxed = False
+
+        # The primary filter may legitimately find nothing: an index written
+        # before version metadata existed has no status/accreditation_year
+        # keys at all, and a question may name an enrollment year rather than
+        # an accreditation year.  Retry the version family, then everything,
+        # and let the Python predicate decide (relaxed mode).
+        if not results["ids"][0] and where is not None:
+            for fallback in (intent.fallback_where(), None):
+                if fallback == where:
+                    continue
+                where = fallback
+                relaxed = True
+                results = query_chroma(fallback)
+                if results["ids"][0]:
+                    break
+
+        # Re-query without the version filter, to see what that filter hid:
+        # those chunks never appear in `results`, so they can only be
+        # reported from a second query.
+        if diagnostics and where is not None:
             try:
                 wide = collection.query(
                     query_embeddings=[query_embedding.tolist()],
@@ -292,16 +324,18 @@ class VectorStoreManager:
                     where=None,
                     include=["documents", "metadatas", "distances"],
                 )
-                visible = set(results["ids"][0])
+                primary_ids = set(results["ids"][0])
+                reported = {chunk.get("chunk_id") for chunk in excluded}
                 for chunk_id, doc, meta, dist in zip(
                     wide["ids"][0], wide["documents"][0],
                     wide["metadatas"][0], wide["distances"][0],
                 ):
-                    if chunk_id in visible:
+                    # Chunks the primary query returned are handled by the
+                    # threshold/version policy below; here only report what
+                    # the metadata filter itself hid.
+                    if chunk_id in primary_ids or chunk_id in reported:
                         continue
-                    reason = ("excluded_outdated" if (meta or {}).get("outdated") is True
-                              else "excluded_legacy_version")
-                    drop(reason, chunk_id, doc, meta, dist)
+                    drop(intent.reason(meta), chunk_id, doc, meta, dist)
             except Exception as e:  # pragma: no cover - diagnostics must not break search
                 logger.warning("Diagnostic query failed (%s) - no excluded chunks reported", e)
 
@@ -329,7 +363,9 @@ class VectorStoreManager:
 
         if self.use_hybrid:
             hits = self._get_keyword_index(collection).search(
-                search_query, self.fetch_k, allow=None if wants_old else _is_current
+                search_query,
+                self.fetch_k,
+                allow=lambda meta: intent.matches(meta, relaxed=relaxed),
             )
             for chunk_id, doc, meta in hits:
                 candidates.setdefault(chunk_id, (doc, meta, None))  # keyword-only: no distance
@@ -337,12 +373,13 @@ class VectorStoreManager:
             ranking = reciprocal_rank_fusion(ranking, [chunk_id for chunk_id, _, _ in hits])
 
         filtered_docs, filtered_meta, filtered_dists = self._apply_version_policy(
-            query,
+            intent,
             [candidates[c][0] for c in ranking],
             [candidates[c][1] for c in ranking],
             [candidates[c][2] for c in ranking],
             max(k, self.fetch_k) if self.use_reranker else k,
             exclude=lambda reason, doc, meta, dist: drop(reason, None, doc, meta, dist),
+            relaxed=relaxed,
         )
 
         if self.use_reranker and filtered_docs:
@@ -383,40 +420,40 @@ class VectorStoreManager:
 
     @staticmethod
     def _apply_version_policy(
-        query: str,
+        intent: VersionIntent,
         documents: list,
         metadatas: list,
         distances: list,
         k: int,
         exclude=None,
+        relaxed: bool = False,
     ) -> tuple[list, list, list]:
         """
         Version-aware result policy (same rules as the scraper's
         src/core/retrieval.py, so `run.py search` there shows what the
         chatbot gets):
-          1. drop chunks of legacy program versions (metadata
-             status == "legacy") and chunks the scraper's DeepSeek check
-             flagged as outdated (outdated == True, e.g. an FAQ still
-             saying "3 smera"), unless the question asks for an old
-             program — this is what stops "2 vs 3 modules" answers
+          1. keep only the program version(s) the question asks about
+             (see src/core/version_filter.py: current by default, an
+             explicit year, or all historical versions) and always drop
+             chunks the scraper's DeepSeek check flagged as outdated
+             (outdated == True, e.g. an FAQ still saying "3 smera")
           2. collapse chunks sharing a dedup_key (same text, same version)
           3. keep the best k
-        Chunks without these metadata fields pass through unchanged.
+        Chunks without version metadata pass through as version-agnostic
+        content in current mode; for a year-specific question they are
+        admitted only when a fallback query was needed (``relaxed``).
 
         ``exclude(reason, doc, meta, dist)`` is called for every dropped
         chunk, which is how the request log explains why a candidate did not
         reach the model.
         """
-        keep_legacy = bool(_LEGACY_QUERY_RE.search(query or ""))
         docs, metas, dists = [], [], []
         seen: set[str] = set()
         for index, (doc, meta, dist) in enumerate(zip(documents, metadatas, distances)):
             meta = meta or {}
-            if not keep_legacy and (meta.get("status") == "legacy" or meta.get("outdated") is True):
+            if not intent.matches(meta, relaxed=relaxed):
                 if exclude:
-                    reason = "excluded_outdated" if meta.get("outdated") is True \
-                        else "excluded_legacy_version"
-                    exclude(reason, doc, meta, dist)
+                    exclude(intent.reason(meta), doc, meta, dist)
                 continue
             key = meta.get("dedup_key")
             if key:

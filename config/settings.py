@@ -48,7 +48,10 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 200
 
     # Retrieval
-    TOP_K_RESULTS: int = 5       # chunks the LLM gets per question
+    # The model gets TOP_K_RESULTS chunks per question and never more than
+    # MAX_CONTEXT_CHUNKS (five or more made answers long and unfocused).
+    TOP_K_RESULTS: int = 3       # chunks the LLM gets per question
+    MAX_CONTEXT_CHUNKS: int = 4  # hard ceiling, whatever TOP_K_RESULTS / k says
     RETRIEVAL_FETCH_K: int = 20  # candidates fetched before the version policy
     SIMILARITY_THRESHOLD: float = 0.7
 

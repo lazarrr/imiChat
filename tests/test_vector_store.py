@@ -30,6 +30,32 @@ CHUNKS = {
 VECTOR_HITS = [("v1", 0.10), ("old", 0.12), ("v2", 0.20), ("v3", 0.25)]
 
 
+def _where_matches(meta, where):
+    """Minimal Chroma metadata-filter evaluator for the fake collection."""
+    if where is None:
+        return True
+    if "$and" in where:
+        return all(_where_matches(meta, item) for item in where["$and"])
+    if "$or" in where:
+        return any(_where_matches(meta, item) for item in where["$or"])
+    for key, condition in where.items():
+        value = (meta or {}).get(key)
+        if not isinstance(condition, dict):
+            if value != condition:
+                return False
+            continue
+        for operator, operand in condition.items():
+            if operator == "$eq" and value != operand:
+                return False
+            if operator == "$ne" and key in (meta or {}) and value == operand:
+                return False
+            if operator == "$in" and value not in operand:
+                return False
+            if operator == "$nin" and value in operand:
+                return False
+    return True
+
+
 class FakeCollection:
     def __init__(self, chunks, vector_hits):
         self.chunks = dict(chunks)
@@ -41,7 +67,7 @@ class FakeCollection:
         self.query_where_log.append(where)
         hits = [
             (chunk_id, dist) for chunk_id, dist in self.vector_hits
-            if where is None or vector_store._is_current(self.chunks[chunk_id][1])
+            if _where_matches(self.chunks[chunk_id][1], where)
         ][:n_results]
         return {
             "ids": [[c for c, _ in hits]],
@@ -95,7 +121,8 @@ class FakeReranker:
 def make_store(collection, **settings):
     config = SimpleNamespace(**{
         "EMBEDDING_MODEL": "e5", "EMBEDDING_DEVICE": "cpu", "VECTOR_DB_PATH": "unused",
-        "CHROMA_COLLECTION": "test", "TOP_K_RESULTS": 2, "RETRIEVAL_FETCH_K": 4,
+        "CHROMA_COLLECTION": "test", "TOP_K_RESULTS": 2, "MAX_CONTEXT_CHUNKS": 4,
+        "RETRIEVAL_FETCH_K": 4,
         "CHUNK_SIZE": 1000, "CHUNK_OVERLAP": 200, "SIMILARITY_THRESHOLD": 0.7,
         "QUERY_SYNONYMS": False, "HYBRID_SEARCH": False, "RERANKER_ENABLED": False,
         "RERANKER_MIN_SCORE": 0.0, "SYNONYMS_FILE": "config/synonyms.txt",
@@ -213,15 +240,18 @@ class SimilaritySearchTests(unittest.TestCase):
         self.assertEqual(dropped[0]["rerank_score"], 0.1)
         self.assertEqual(dropped[0]["rerank_min_score"], 0.5)
 
-    def test_a_question_about_the_old_program_skips_the_wide_diagnostic_query(self):
+    def test_a_question_about_the_old_program_skips_the_current_version_filter(self):
         store, _ = make_store(self.collection)
 
         results = store.similarity_search(
             "Koliko ESPB je imao Osnovi programiranja po starom programu?", diagnostics=True)
 
-        # The legacy filter was not applied, so there is nothing hidden to
-        # re-query for; the legacy chunk is already visible.
-        self.assertEqual(self.collection.query_where_log, [None])
+        # The old-program filter is applied inside Chroma (instead of the
+        # current-only filter); diagnostics then query without it to report
+        # what the old-program filter hid.
+        current_where = self.collection.query_where_log[0]
+        self.assertNotEqual(current_where, vector_store._CURRENT_ONLY_WHERE)
+        self.assertEqual(self.collection.query_where_log[1], None)
         self.assertEqual(
             [c for c in results["excluded"] if c["reason"] == "excluded_legacy_version"], [])
 
@@ -286,6 +316,154 @@ class SimilaritySearchTests(unittest.TestCase):
 
         self.assertEqual(peak, 1)
         self.assertEqual(self.collection.get_calls, 1)  # keyword index built once
+
+
+VERSION_CHUNKS = {
+    "neutral": ("Opšte informacije o fakultetu.", {}),
+    "current": (
+        "Informatika 2026 ima dva izborna modula.",
+        {"status": "enrolling", "accreditation_year": 2026},
+    ),
+    "old2019": (
+        "Informatika 2019 ima tri izborna modula.",
+        {"status": "phase_out", "accreditation_year": 2019,
+         "valid_for": "studenti upisani 2019/20–2025/26"},
+    ),
+    "old2011": (
+        "Informatika 2011 ima pet izbornih modula.",
+        {"status": "legacy", "accreditation_year": 2011},
+    ),
+    "upcoming2027": (
+        "Matematika 2027 ima tri modula.",
+        {"status": "upcoming", "accreditation_year": 2027,
+         "valid_for": "upis od 2027/28"},
+    ),
+    "outdated": ("FAQ: informatika ima tri smera.", {"outdated": True}),
+}
+VERSION_HITS = [
+    ("current", 0.10), ("old2019", 0.11), ("upcoming2027", 0.12),
+    ("neutral", 0.13), ("old2011", 0.14), ("outdated", 0.08),
+]
+
+
+@unittest.skipIf(vector_store is None, "chromadb / sentence-transformers not installed")
+class VersionAwareSearchTests(unittest.TestCase):
+    def setUp(self):
+        self.collection = FakeCollection(VERSION_CHUNKS, VERSION_HITS)
+
+    def test_default_question_uses_the_current_version_only(self):
+        store, _ = make_store(
+            self.collection, TOP_K_RESULTS=3, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search("Koliko modula ima informatika?")
+
+        # enrolling + version-agnostic; phase_out, legacy and upcoming are out
+        self.assertEqual(
+            documents(results),
+            [VERSION_CHUNKS["current"][0], VERSION_CHUNKS["neutral"][0]],
+        )
+        self.assertEqual(
+            self.collection.query_where_log, [vector_store._CURRENT_ONLY_WHERE])
+
+    def test_a_question_about_an_old_year_fetches_that_version(self):
+        store, _ = make_store(
+            self.collection, TOP_K_RESULTS=3, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search(
+            "Koliko modula je imala informatika 2019. godine?")
+
+        self.assertEqual(documents(results), [VERSION_CHUNKS["old2019"][0]])
+        self.assertEqual(self.collection.query_where_log[0], {
+            "$and": [
+                {"accreditation_year": {"$in": [2019]}},
+                {"outdated": {"$ne": True}},
+            ]
+        })
+
+    def test_a_question_about_a_future_year_fetches_the_upcoming_version(self):
+        store, _ = make_store(
+            self.collection, TOP_K_RESULTS=3, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search(
+            "Koji moduli postoje za upis 2027/28?")
+
+        self.assertEqual(documents(results), [VERSION_CHUNKS["upcoming2027"][0]])
+
+    def test_a_generic_old_program_question_fetches_legacy_and_phase_out(self):
+        store, _ = make_store(
+            self.collection, TOP_K_RESULTS=3, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search(
+            "Šta piše u starom programu informatike?")
+
+        self.assertEqual(
+            documents(results),
+            [VERSION_CHUNKS["old2019"][0], VERSION_CHUNKS["old2011"][0]],
+        )
+
+    def test_an_enrollment_year_matches_the_versions_valid_for_range(self):
+        store, _ = make_store(
+            self.collection, TOP_K_RESULTS=3, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search(
+            "Koji program je važio za upis 2025. godine?")
+
+        # 2025 is not an accreditation year: the exact-year query finds
+        # nothing, the phase_out version's valid_for range admits it.
+        self.assertEqual(documents(results), [VERSION_CHUNKS["old2019"][0]])
+
+    def test_an_index_without_version_metadata_is_still_answerable(self):
+        unversioned = {
+            f"u{i}": (f"Opšti podatak {i}.", {}) for i in range(4)
+        }
+        collection = FakeCollection(
+            unversioned, [(chunk_id, 0.1 + i / 100) for i, chunk_id in enumerate(unversioned)])
+        store, _ = make_store(collection, TOP_K_RESULTS=2, RETRIEVAL_FETCH_K=10)
+
+        results = store.similarity_search("Šta je bilo na programu 2019. godine?")
+
+        self.assertEqual(len(documents(results)), 2)
+
+    def test_diagnostics_name_the_upcoming_status_and_always_drop_outdated(self):
+        store, _ = make_store(self.collection)
+
+        results = store.similarity_search(
+            "Koliko modula ima informatika?", diagnostics=True)
+
+        reasons = {
+            chunk["metadata"].get("status") or "outdated": chunk["reason"]
+            for chunk in results["excluded"]
+        }
+        self.assertEqual(reasons["phase_out"], "excluded_legacy_version")
+        self.assertEqual(reasons["legacy"], "excluded_legacy_version")
+        self.assertEqual(reasons["upcoming"], "excluded_upcoming_version")
+        self.assertEqual(reasons["outdated"], "excluded_outdated")
+
+
+@unittest.skipIf(vector_store is None, "chromadb / sentence-transformers not installed")
+class ChunkLimitTests(unittest.TestCase):
+    def test_the_model_never_gets_five_chunks(self):
+        chunks = {f"n{i}": (f"Podatak {i}.", {}) for i in range(8)}
+        hits = [(chunk_id, 0.1 + i / 100) for i, chunk_id in enumerate(chunks)]
+        store, _ = make_store(
+            FakeCollection(chunks, hits),
+            TOP_K_RESULTS=10, MAX_CONTEXT_CHUNKS=4, RETRIEVAL_FETCH_K=20,
+        )
+
+        results = store.similarity_search("Sve informacije")
+
+        self.assertEqual(len(documents(results)), 4)
+        self.assertLess(len(documents(results)), 5)
+
+    def test_an_explicit_smaller_k_is_honoured(self):
+        chunks = {f"n{i}": (f"Podatak {i}.", {}) for i in range(8)}
+        hits = [(chunk_id, 0.1 + i / 100) for i, chunk_id in enumerate(chunks)]
+        store, _ = make_store(
+            FakeCollection(chunks, hits),
+            TOP_K_RESULTS=3, MAX_CONTEXT_CHUNKS=4, RETRIEVAL_FETCH_K=20,
+        )
+
+        self.assertEqual(len(documents(store.similarity_search("Sve", k=2))), 2)
 
 
 if __name__ == "__main__":

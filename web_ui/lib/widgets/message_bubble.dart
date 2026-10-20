@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
@@ -6,6 +7,8 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
+import '../models/source_citation.dart';
+import '../services/link_launcher.dart';
 import '../theme.dart';
 
 /// A single chat turn.
@@ -14,9 +17,13 @@ import '../theme.dart';
 /// scrolled back into view render statically so the list never "replays"
 /// itself.
 class MessageBubble extends StatelessWidget {
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({super.key, required this.message, this.onOpenLink});
 
   final ChatMessage message;
+
+  /// Overrides how links are opened — tests use this to record taps instead of
+  /// launching a browser.
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -25,7 +32,7 @@ class MessageBubble extends StatelessWidget {
 
     final content = isUser
         ? _UserMessage(message: message)
-        : _AssistantMessage(message: message);
+        : _AssistantMessage(message: message, onOpenLink: onOpenLink);
 
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: isFresh ? 0.0 : 1.0, end: 1.0),
@@ -33,7 +40,10 @@ class MessageBubble extends StatelessWidget {
       curve: kEase,
       builder: (context, t, child) => Opacity(
         opacity: t,
-        child: Transform.translate(offset: Offset(0, 12 * (1 - t)), child: child),
+        child: Transform.translate(
+          offset: Offset(0, 12 * (1 - t)),
+          child: child,
+        ),
       ),
       child: Padding(
         padding: EdgeInsets.symmetric(vertical: isUser ? 9 : 12),
@@ -60,8 +70,7 @@ class _UserMessage extends StatelessWidget {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 620),
             child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 17, vertical: 12),
+              padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 12),
               decoration: BoxDecoration(
                 gradient: kBrandGradient,
                 borderRadius: const BorderRadius.only(
@@ -100,9 +109,10 @@ class _UserMessage extends StatelessWidget {
 // ---------------------------------------------------------- assistant side -- //
 
 class _AssistantMessage extends StatelessWidget {
-  const _AssistantMessage({required this.message});
+  const _AssistantMessage({required this.message, this.onOpenLink});
 
   final ChatMessage message;
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -119,7 +129,10 @@ class _AssistantMessage extends StatelessWidget {
               const SizedBox(height: 7),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 760),
-                child: _AssistantBubble(message: message),
+                child: _AssistantBubble(
+                  message: message,
+                  onOpenLink: onOpenLink,
+                ),
               ),
             ],
           ),
@@ -154,16 +167,10 @@ class _MetaRow extends StatelessWidget {
         Container(
           width: 3,
           height: 3,
-          decoration: BoxDecoration(
-            color: p.textMuted,
-            shape: BoxShape.circle,
-          ),
+          decoration: BoxDecoration(color: p.textMuted, shape: BoxShape.circle),
         ),
         const SizedBox(width: 7),
-        Text(
-          time,
-          style: TextStyle(fontSize: 11.5, color: p.textMuted),
-        ),
+        Text(time, style: TextStyle(fontSize: 11.5, color: p.textMuted)),
         if (message.content.trim().isNotEmpty) ...[
           const SizedBox(width: 6),
           _CopyAction(text: message.content),
@@ -253,16 +260,20 @@ class _AssistantAvatar extends StatelessWidget {
           ),
         ],
       ),
-      child: const Icon(Icons.auto_awesome_rounded,
-          color: Colors.white, size: 17),
+      child: const Icon(
+        Icons.auto_awesome_rounded,
+        color: Colors.white,
+        size: 17,
+      ),
     );
   }
 }
 
 class _AssistantBubble extends StatelessWidget {
-  const _AssistantBubble({required this.message});
+  const _AssistantBubble({required this.message, this.onOpenLink});
 
   final ChatMessage message;
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -296,15 +307,24 @@ class _AssistantBubble extends StatelessWidget {
           if (result.text.isEmpty && message.streaming)
             const _TypingIndicator()
           else
-            MarkdownBody(
-              data: result.text,
-              selectable: true,
-              styleSheet: _markdownStyle(context, p),
+            // Markdown's `selectable` mode renders through a hidden text
+            // field, which swallows link taps on the web. SelectionArea keeps
+            // the answer selectable while links stay plain text spans that
+            // receive pointer events normally.
+            SelectionArea(
+              child: MarkdownBody(
+                data: result.text,
+                styleSheet: _markdownStyle(context, p),
+                onTapLink: (text, href, title) {
+                  unawaited(openExternalHref(href, launcher: onOpenLink));
+                },
+              ),
             ),
-          if (message.streaming && result.text.isNotEmpty) const _StreamingCursor(),
+          if (message.streaming && result.text.isNotEmpty)
+            const _StreamingCursor(),
           if (result.sources.isNotEmpty) ...[
             const SizedBox(height: 14),
-            _SourcesCard(sources: result.sources),
+            _SourcesCard(sources: result.sources, onOpenLink: onOpenLink),
           ],
         ],
       ),
@@ -313,11 +333,7 @@ class _AssistantBubble extends StatelessWidget {
 }
 
 MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
-  final body = TextStyle(
-    fontSize: 14.5,
-    height: 1.65,
-    color: p.textPrimary,
-  );
+  final body = TextStyle(fontSize: 14.5, height: 1.65, color: p.textPrimary);
 
   return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
     p: body,
@@ -325,7 +341,11 @@ MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
     em: body.copyWith(fontStyle: FontStyle.italic),
     h1: body.copyWith(fontSize: 19, fontWeight: FontWeight.w800, height: 1.35),
     h2: body.copyWith(fontSize: 17, fontWeight: FontWeight.w800, height: 1.35),
-    h3: body.copyWith(fontSize: 15.5, fontWeight: FontWeight.w700, height: 1.35),
+    h3: body.copyWith(
+      fontSize: 15.5,
+      fontWeight: FontWeight.w700,
+      height: 1.35,
+    ),
     a: body.copyWith(
       color: Theme.of(context).colorScheme.primary,
       decoration: TextDecoration.underline,
@@ -334,9 +354,7 @@ MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
     blockquoteDecoration: BoxDecoration(
       color: kIndigo.withValues(alpha: p.isDark ? 0.16 : 0.06),
       borderRadius: BorderRadius.circular(R.xs),
-      border: const Border(
-        left: BorderSide(color: kIndigo, width: 3),
-      ),
+      border: const Border(left: BorderSide(color: kIndigo, width: 3)),
     ),
     blockquotePadding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
     code: TextStyle(
@@ -356,7 +374,10 @@ MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
     horizontalRuleDecoration: BoxDecoration(
       border: Border(top: BorderSide(color: p.border)),
     ),
-    tableBorder: TableBorder.all(color: p.border, borderRadius: BorderRadius.circular(R.xs)),
+    tableBorder: TableBorder.all(
+      color: p.border,
+      borderRadius: BorderRadius.circular(R.xs),
+    ),
     tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
   );
 }
@@ -364,9 +385,10 @@ MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
 // ---------------------------------------------------------------- sources -- //
 
 class _SourcesCard extends StatelessWidget {
-  const _SourcesCard({required this.sources});
+  const _SourcesCard({required this.sources, this.onOpenLink});
 
   final List<String> sources;
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
@@ -385,8 +407,11 @@ class _SourcesCard extends StatelessWidget {
         children: [
           Row(
             children: [
-              Icon(Icons.link_rounded,
-                  size: 14, color: Theme.of(context).colorScheme.primary),
+              Icon(
+                Icons.link_rounded,
+                size: 14,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               const SizedBox(width: 6),
               Text(
                 'Izvori',
@@ -399,8 +424,10 @@ class _SourcesCard extends StatelessWidget {
               ),
               const SizedBox(width: 8),
               Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 7, vertical: 1.5),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 7,
+                  vertical: 1.5,
+                ),
                 decoration: BoxDecoration(
                   color: kIndigo.withValues(alpha: p.isDark ? 0.28 : 0.12),
                   borderRadius: BorderRadius.circular(R.pill),
@@ -421,7 +448,8 @@ class _SourcesCard extends StatelessWidget {
             spacing: 7,
             runSpacing: 7,
             children: [
-              for (final source in sources) _SourceChip(raw: source),
+              for (final source in sources)
+                _SourceChip(raw: source, onOpenLink: onOpenLink),
             ],
           ),
         ],
@@ -431,9 +459,10 @@ class _SourcesCard extends StatelessWidget {
 }
 
 class _SourceChip extends StatefulWidget {
-  const _SourceChip({required this.raw});
+  const _SourceChip({required this.raw, this.onOpenLink});
 
   final String raw;
+  final LinkLauncher? onOpenLink;
 
   @override
   State<_SourceChip> createState() => _SourceChipState();
@@ -442,69 +471,97 @@ class _SourceChip extends StatefulWidget {
 class _SourceChipState extends State<_SourceChip> {
   bool _hovering = false;
 
+  void _open(SourceCitation citation) {
+    final url = citation.url;
+    if (url == null) return;
+    unawaited(openExternalLink(url, launcher: widget.onOpenLink));
+  }
+
   @override
   Widget build(BuildContext context) {
     final p = context.uni;
 
     // Format: "[1] informatika_oas_2021.pdf — strana 12"
-    final match =
-        RegExp(r'^\[(\d+)\]\s*(.*)$').firstMatch(widget.raw.trim());
-    final number = match?.group(1) ?? '·';
-    final label = match?.group(2)?.trim() ?? widget.raw.trim();
+    //     or: "[2] Osnovi programiranja — https://pmf.kg.ac.rs/..."
+    final citation = parseSourceCitation(widget.raw);
+    final number = citation.number ?? '·';
+    final url = citation.url;
+    final clickable = url != null;
+    final primary = Theme.of(context).colorScheme.primary;
 
-    return MouseRegion(
-      cursor: SystemMouseCursors.basic,
-      onEnter: (_) => setState(() => _hovering = true),
-      onExit: (_) => setState(() => _hovering = false),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        curve: kEase,
-        padding: const EdgeInsets.fromLTRB(6, 5, 12, 5),
-        decoration: BoxDecoration(
-          color: _hovering
-              ? kIndigo.withValues(alpha: p.isDark ? 0.26 : 0.11)
-              : p.surface,
-          borderRadius: BorderRadius.circular(R.pill),
-          border: Border.all(
-            color: _hovering
-                ? kIndigo.withValues(alpha: 0.4)
-                : p.border,
+    return Tooltip(
+      message: clickable
+          ? '${citation.label}\n${url.toString()}'
+          : citation.label,
+      child: MouseRegion(
+        cursor: clickable ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          onTap: clickable ? () => _open(citation) : null,
+          child: Semantics(
+            link: clickable,
+            label: clickable
+                ? '${citation.label}, otvori izvor'
+                : citation.label,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              curve: kEase,
+              padding: const EdgeInsets.fromLTRB(6, 5, 12, 5),
+              decoration: BoxDecoration(
+                color: _hovering
+                    ? kIndigo.withValues(alpha: p.isDark ? 0.26 : 0.11)
+                    : p.surface,
+                borderRadius: BorderRadius.circular(R.pill),
+                border: Border.all(
+                  color: _hovering ? kIndigo.withValues(alpha: 0.4) : p.border,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 19,
+                    height: 19,
+                    alignment: Alignment.center,
+                    decoration: const BoxDecoration(
+                      gradient: kBrandGradient,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      number,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 400),
+                    child: Text(
+                      citation.label,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: clickable ? primary : p.textSecondary,
+                        decoration: clickable ? TextDecoration.underline : null,
+                        decorationColor: clickable
+                            ? primary.withValues(alpha: 0.45)
+                            : null,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (clickable) ...[
+                    const SizedBox(width: 5),
+                    Icon(Icons.open_in_new_rounded, size: 12, color: primary),
+                  ],
+                ],
+              ),
+            ),
           ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              width: 19,
-              height: 19,
-              alignment: Alignment.center,
-              decoration: const BoxDecoration(
-                gradient: kBrandGradient,
-                shape: BoxShape.circle,
-              ),
-              child: Text(
-                number,
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 10,
-                  fontWeight: FontWeight.w800,
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 400),
-              child: Text(
-                label,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: p.textSecondary,
-                ),
-                overflow: TextOverflow.ellipsis,
-              ),
-            ),
-          ],
         ),
       ),
     );
