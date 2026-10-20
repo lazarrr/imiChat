@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import '../state/chat_controller.dart';
+import '../theme.dart';
 import '../widgets/chat_view.dart';
 import '../widgets/sidebar.dart';
 
+/// Responsive shell: permanent sidebar on desktop, drawer on narrow screens.
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key, required this.controller});
 
@@ -15,6 +17,8 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final _scaffoldKey = GlobalKey<ScaffoldState>();
+
+  static const _wideBreakpoint = 900.0;
 
   void _openSidebar() => _scaffoldKey.currentState?.openDrawer();
 
@@ -32,18 +36,11 @@ class _HomeScreenState extends State<HomeScreen> {
       key: _scaffoldKey,
       body: LayoutBuilder(
         builder: (context, constraints) {
-          final wide = constraints.maxWidth >= 900;
-
-          if (wide) {
+          if (constraints.maxWidth >= _wideBreakpoint) {
             return Row(
               children: [
                 Sidebar(controller: controller),
-                Expanded(
-                  child: ChatView(
-                    controller: controller,
-                    onOpenSidebar: () {},
-                  ),
-                ),
+                Expanded(child: ChatView(controller: controller)),
               ],
             );
           }
@@ -54,17 +51,39 @@ class _HomeScreenState extends State<HomeScreen> {
           );
         },
       ),
-      drawer: MediaQuery.sizeOf(context).width < 900
-          ? Drawer(
-              width: 300,
-              child: SafeArea(
-                child: Sidebar(
-                  controller: controller,
-                  onConversationSelected: _closeSidebar,
-                ),
-              ),
+      drawer: MediaQuery.sizeOf(context).width < _wideBreakpoint
+          ? _SidebarDrawer(
+              controller: controller,
+              onSelected: _closeSidebar,
             )
           : null,
+    );
+  }
+}
+
+class _SidebarDrawer extends StatelessWidget {
+  const _SidebarDrawer({required this.controller, required this.onSelected});
+
+  final ChatController controller;
+  final VoidCallback onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.uni;
+
+    return Drawer(
+      width: 300,
+      backgroundColor: p.surface,
+      surfaceTintColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.horizontal(right: Radius.circular(R.lg)),
+      ),
+      child: SafeArea(
+        child: Sidebar(
+          controller: controller,
+          onConversationSelected: onSelected,
+        ),
+      ),
     );
   }
 }

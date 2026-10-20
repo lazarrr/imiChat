@@ -1,37 +1,240 @@
+import 'dart:async';
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
 import '../models/chat_message.dart';
 import '../models/conversation.dart';
+import '../models/source_citation.dart';
+import '../services/link_launcher.dart';
 import '../theme.dart';
 
+/// A single chat turn.
+///
+/// Newly created messages fade + slide in; messages restored from storage or
+/// scrolled back into view render statically so the list never "replays"
+/// itself.
 class MessageBubble extends StatelessWidget {
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({super.key, required this.message, this.onOpenLink});
+
+  final ChatMessage message;
+
+  /// Overrides how links are opened — tests use this to record taps instead of
+  /// launching a browser.
+  final LinkLauncher? onOpenLink;
+
+  @override
+  Widget build(BuildContext context) {
+    final isUser = message.role == MessageRole.user;
+    final isFresh = DateTime.now().difference(message.timestamp).inSeconds < 2;
+
+    final content = isUser
+        ? _UserMessage(message: message)
+        : _AssistantMessage(message: message, onOpenLink: onOpenLink);
+
+    return TweenAnimationBuilder<double>(
+      tween: Tween(begin: isFresh ? 0.0 : 1.0, end: 1.0),
+      duration: const Duration(milliseconds: 300),
+      curve: kEase,
+      builder: (context, t, child) => Opacity(
+        opacity: t,
+        child: Transform.translate(
+          offset: Offset(0, 12 * (1 - t)),
+          child: child,
+        ),
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(vertical: isUser ? 9 : 12),
+        child: content,
+      ),
+    );
+  }
+}
+
+// --------------------------------------------------------------- user side -- //
+
+class _UserMessage extends StatelessWidget {
+  const _UserMessage({required this.message});
 
   final ChatMessage message;
 
   @override
   Widget build(BuildContext context) {
-    final isUser = message.role == MessageRole.user;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Row(
-        mainAxisAlignment:
-            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (!isUser) ...[
-            const _AssistantAvatar(),
-            const SizedBox(width: 12),
-          ],
-          Flexible(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 760),
-              child: isUser ? _UserBubble(message) : _AssistantBubble(message),
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.end,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Flexible(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 620),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 17, vertical: 12),
+              decoration: BoxDecoration(
+                gradient: kBrandGradient,
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(20),
+                  topRight: Radius.circular(20),
+                  bottomLeft: Radius.circular(20),
+                  bottomRight: Radius.circular(6),
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: kIndigo.withValues(alpha: 0.28),
+                    blurRadius: 18,
+                    spreadRadius: -4,
+                    offset: const Offset(0, 6),
+                  ),
+                ],
+              ),
+              child: SelectableText(
+                message.content,
+                style: const TextStyle(
+                  color: Colors.white,
+                  fontSize: 14.5,
+                  height: 1.5,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
             ),
           ),
+        ),
+        const SizedBox(width: 44),
+      ],
+    );
+  }
+}
+
+// ---------------------------------------------------------- assistant side -- //
+
+class _AssistantMessage extends StatelessWidget {
+  const _AssistantMessage({required this.message, this.onOpenLink});
+
+  final ChatMessage message;
+  final LinkLauncher? onOpenLink;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const _AssistantAvatar(),
+        const SizedBox(width: 12),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _MetaRow(message: message),
+              const SizedBox(height: 7),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 760),
+                child: _AssistantBubble(
+                  message: message,
+                  onOpenLink: onOpenLink,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _MetaRow extends StatelessWidget {
+  const _MetaRow({required this.message});
+
+  final ChatMessage message;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.uni;
+    final time = TimeOfDay.fromDateTime(message.timestamp).format(context);
+
+    return Row(
+      children: [
+        Text(
+          'UniChat',
+          style: TextStyle(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w700,
+            letterSpacing: -0.1,
+            color: p.textPrimary,
+          ),
+        ),
+        const SizedBox(width: 7),
+        Container(
+          width: 3,
+          height: 3,
+          decoration: BoxDecoration(color: p.textMuted, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 7),
+        Text(time, style: TextStyle(fontSize: 11.5, color: p.textMuted)),
+        if (message.content.trim().isNotEmpty) ...[
+          const SizedBox(width: 6),
+          _CopyAction(text: message.content),
         ],
+      ],
+    );
+  }
+}
+
+class _CopyAction extends StatefulWidget {
+  const _CopyAction({required this.text});
+
+  final String text;
+
+  @override
+  State<_CopyAction> createState() => _CopyActionState();
+}
+
+class _CopyActionState extends State<_CopyAction> {
+  bool _copied = false;
+  bool _hovering = false;
+
+  Future<void> _copy() async {
+    await Clipboard.setData(ClipboardData(text: widget.text));
+    if (!mounted) return;
+    setState(() => _copied = true);
+    await Future<void>.delayed(const Duration(milliseconds: 1400));
+    if (!mounted) return;
+    setState(() => _copied = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final p = context.uni;
+    final color = _copied
+        ? kEmerald
+        : (_hovering ? p.textSecondary : p.textMuted);
+
+    return Tooltip(
+      message: _copied ? 'Kopirano' : 'Kopiraj odgovor',
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          onTap: _copy,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 160),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            decoration: BoxDecoration(
+              color: _hovering ? p.hover : Colors.transparent,
+              borderRadius: BorderRadius.circular(R.xs - 2),
+            ),
+            child: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 180),
+              child: Icon(
+                _copied ? Icons.check_rounded : Icons.copy_rounded,
+                key: ValueKey(_copied),
+                size: 14,
+                color: color,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -46,83 +249,56 @@ class _AssistantAvatar extends StatelessWidget {
       width: 34,
       height: 34,
       decoration: BoxDecoration(
-        gradient: kUserBubbleGradient,
-        shape: BoxShape.circle,
+        gradient: kBrandGradient,
+        borderRadius: BorderRadius.circular(R.sm),
         boxShadow: [
           BoxShadow(
-            color: kIndigo.withValues(alpha: 0.3),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
+            color: kIndigo.withValues(alpha: 0.32),
+            blurRadius: 12,
+            spreadRadius: -3,
+            offset: const Offset(0, 4),
           ),
         ],
       ),
-      child: const Icon(Icons.auto_awesome_rounded,
-          color: Colors.white, size: 17),
-    );
-  }
-}
-
-class _UserBubble extends StatelessWidget {
-  const _UserBubble(this.message);
-
-  final ChatMessage message;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
-      decoration: BoxDecoration(
-        gradient: kUserBubbleGradient,
-        borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(18),
-          topRight: Radius.circular(18),
-          bottomLeft: Radius.circular(18),
-          bottomRight: Radius.circular(4),
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: kIndigo.withValues(alpha: 0.18),
-            blurRadius: 10,
-            offset: const Offset(0, 3),
-          ),
-        ],
-      ),
-      child: SelectableText(
-        message.content,
-        style: const TextStyle(
-          color: Colors.white,
-          fontSize: 14.5,
-          height: 1.45,
-        ),
+      child: const Icon(
+        Icons.auto_awesome_rounded,
+        color: Colors.white,
+        size: 17,
       ),
     );
   }
 }
 
 class _AssistantBubble extends StatelessWidget {
-  const _AssistantBubble(this.message);
+  const _AssistantBubble({required this.message, this.onOpenLink});
 
   final ChatMessage message;
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final p = context.uni;
     final result = splitSources(message.content);
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 12),
+      padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF1B1F2D) : Colors.white,
+        color: p.assistantBubble,
         borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(4),
-          topRight: Radius.circular(18),
-          bottomLeft: Radius.circular(18),
-          bottomRight: Radius.circular(18),
+          topLeft: Radius.circular(6),
+          topRight: Radius.circular(20),
+          bottomLeft: Radius.circular(20),
+          bottomRight: Radius.circular(20),
         ),
-        border: Border.all(
-          color: isDark ? const Color(0xFF282D40) : const Color(0xFFE4E7F0),
-        ),
+        border: Border.all(color: p.border),
+        boxShadow: [
+          BoxShadow(
+            color: p.shadow,
+            blurRadius: 18,
+            spreadRadius: -8,
+            offset: const Offset(0, 8),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -131,16 +307,24 @@ class _AssistantBubble extends StatelessWidget {
           if (result.text.isEmpty && message.streaming)
             const _TypingIndicator()
           else
-            MarkdownBody(
-              data: result.text,
-              selectable: true,
-              styleSheet: _markdownStyle(context, isDark),
+            // Markdown's `selectable` mode renders through a hidden text
+            // field, which swallows link taps on the web. SelectionArea keeps
+            // the answer selectable while links stay plain text spans that
+            // receive pointer events normally.
+            SelectionArea(
+              child: MarkdownBody(
+                data: result.text,
+                styleSheet: _markdownStyle(context, p),
+                onTapLink: (text, href, title) {
+                  unawaited(openExternalHref(href, launcher: onOpenLink));
+                },
+              ),
             ),
           if (message.streaming && result.text.isNotEmpty)
             const _StreamingCursor(),
           if (result.sources.isNotEmpty) ...[
-            const SizedBox(height: 12),
-            _SourcesCard(sources: result.sources),
+            const SizedBox(height: 14),
+            _SourcesCard(sources: result.sources, onOpenLink: onOpenLink),
           ],
         ],
       ),
@@ -148,92 +332,124 @@ class _AssistantBubble extends StatelessWidget {
   }
 }
 
-MarkdownStyleSheet _markdownStyle(BuildContext context, bool isDark) {
-  final theme = Theme.of(context);
-  final body = theme.textTheme.bodyMedium!.copyWith(
-    fontSize: 14.5,
-    height: 1.6,
-    color: isDark ? const Color(0xFFE2E5EF) : const Color(0xFF23263A),
-  );
+MarkdownStyleSheet _markdownStyle(BuildContext context, UniPalette p) {
+  final body = TextStyle(fontSize: 14.5, height: 1.65, color: p.textPrimary);
 
-  return MarkdownStyleSheet.fromTheme(theme).copyWith(
+  return MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(
     p: body,
     strong: body.copyWith(fontWeight: FontWeight.w700),
     em: body.copyWith(fontStyle: FontStyle.italic),
-    h1: body.copyWith(fontSize: 18, fontWeight: FontWeight.w800),
-    h2: body.copyWith(fontSize: 16.5, fontWeight: FontWeight.w800),
-    h3: body.copyWith(fontSize: 15, fontWeight: FontWeight.w700),
-    blockquoteDecoration: BoxDecoration(
-      color: kIndigo.withValues(alpha: isDark ? 0.18 : 0.07),
-      borderRadius: BorderRadius.circular(8),
-      border: Border(
-        left: BorderSide(color: kIndigo, width: 3),
-      ),
+    h1: body.copyWith(fontSize: 19, fontWeight: FontWeight.w800, height: 1.35),
+    h2: body.copyWith(fontSize: 17, fontWeight: FontWeight.w800, height: 1.35),
+    h3: body.copyWith(
+      fontSize: 15.5,
+      fontWeight: FontWeight.w700,
+      height: 1.35,
     ),
-    blockquotePadding: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-    code: body.copyWith(
+    a: body.copyWith(
+      color: Theme.of(context).colorScheme.primary,
+      decoration: TextDecoration.underline,
+      decorationColor: Theme.of(context).colorScheme.primary,
+    ),
+    blockquoteDecoration: BoxDecoration(
+      color: kIndigo.withValues(alpha: p.isDark ? 0.16 : 0.06),
+      borderRadius: BorderRadius.circular(R.xs),
+      border: const Border(left: BorderSide(color: kIndigo, width: 3)),
+    ),
+    blockquotePadding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+    code: TextStyle(
       fontFamily: 'monospace',
-      backgroundColor:
-          isDark ? const Color(0xFF242940) : const Color(0xFFF0F1F8),
+      backgroundColor: p.surfaceSunken,
       fontSize: 13,
+      color: p.textPrimary,
     ),
     codeblockDecoration: BoxDecoration(
-      color: isDark ? const Color(0xFF242940) : const Color(0xFFF0F1F8),
-      borderRadius: BorderRadius.circular(10),
+      color: p.surfaceSunken,
+      borderRadius: BorderRadius.circular(R.sm),
+      border: Border.all(color: p.border),
     ),
-    codeblockPadding: const EdgeInsets.all(12),
+    codeblockPadding: const EdgeInsets.all(14),
     listBullet: body,
-    tableBorder: TableBorder.all(
-      color: isDark ? const Color(0xFF2C3146) : const Color(0xFFDCE0EC),
+    listIndent: 22,
+    horizontalRuleDecoration: BoxDecoration(
+      border: Border(top: BorderSide(color: p.border)),
     ),
+    tableBorder: TableBorder.all(
+      color: p.border,
+      borderRadius: BorderRadius.circular(R.xs),
+    ),
+    tableCellsPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
   );
 }
 
+// ---------------------------------------------------------------- sources -- //
+
 class _SourcesCard extends StatelessWidget {
-  const _SourcesCard({required this.sources});
+  const _SourcesCard({required this.sources, this.onOpenLink});
 
   final List<String> sources;
+  final LinkLauncher? onOpenLink;
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final isDark = theme.brightness == Brightness.dark;
+    final p = context.uni;
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(12, 11, 12, 12),
       decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF161A26) : const Color(0xFFF4F6FB),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: isDark ? const Color(0xFF2A2F42) : const Color(0xFFE2E6F1),
-        ),
+        color: p.surfaceSunken,
+        borderRadius: BorderRadius.circular(R.md),
+        border: Border.all(color: p.border),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Icon(Icons.link_rounded,
-                  size: 15, color: theme.colorScheme.primary),
+              Icon(
+                Icons.link_rounded,
+                size: 14,
+                color: Theme.of(context).colorScheme.primary,
+              ),
               const SizedBox(width: 6),
               Text(
                 'Izvori',
-                style: theme.textTheme.labelMedium?.copyWith(
-                  fontWeight: FontWeight.w700,
-                  letterSpacing: 0.4,
-                  color: theme.colorScheme.onSurfaceVariant,
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w800,
+                  letterSpacing: 0.8,
+                  color: p.textSecondary,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 7,
+                  vertical: 1.5,
+                ),
+                decoration: BoxDecoration(
+                  color: kIndigo.withValues(alpha: p.isDark ? 0.28 : 0.12),
+                  borderRadius: BorderRadius.circular(R.pill),
+                ),
+                child: Text(
+                  '${sources.length}',
+                  style: TextStyle(
+                    fontSize: 10.5,
+                    fontWeight: FontWeight.w800,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 10),
           Wrap(
-            spacing: 6,
-            runSpacing: 6,
+            spacing: 7,
+            runSpacing: 7,
             children: [
               for (final source in sources)
-                _SourceChip(raw: source, isDark: isDark),
+                _SourceChip(raw: source, onOpenLink: onOpenLink),
             ],
           ),
         ],
@@ -242,67 +458,117 @@ class _SourcesCard extends StatelessWidget {
   }
 }
 
-class _SourceChip extends StatelessWidget {
-  const _SourceChip({required this.raw, required this.isDark});
+class _SourceChip extends StatefulWidget {
+  const _SourceChip({required this.raw, this.onOpenLink});
 
   final String raw;
-  final bool isDark;
+  final LinkLauncher? onOpenLink;
+
+  @override
+  State<_SourceChip> createState() => _SourceChipState();
+}
+
+class _SourceChipState extends State<_SourceChip> {
+  bool _hovering = false;
+
+  void _open(SourceCitation citation) {
+    final url = citation.url;
+    if (url == null) return;
+    unawaited(openExternalLink(url, launcher: widget.onOpenLink));
+  }
 
   @override
   Widget build(BuildContext context) {
-    // Format: "[1] informatika_oas_2021.pdf — strana 12"
-    final match = RegExp(r'^\[(\d+)\]\s*(.*)$').firstMatch(raw.trim());
-    final number = match?.group(1) ?? '·';
-    final label = match?.group(2)?.trim() ?? raw.trim();
+    final p = context.uni;
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      decoration: BoxDecoration(
-        color: isDark
-            ? kIndigo.withValues(alpha: 0.25)
-            : kIndigo.withValues(alpha: 0.1),
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 18,
-            height: 18,
-            alignment: Alignment.center,
-            decoration: const BoxDecoration(
-              color: kIndigo,
-              shape: BoxShape.circle,
-            ),
-            child: Text(
-              number,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 10.5,
-                fontWeight: FontWeight.w700,
+    // Format: "[1] informatika_oas_2021.pdf — strana 12"
+    //     or: "[2] Osnovi programiranja — https://pmf.kg.ac.rs/..."
+    final citation = parseSourceCitation(widget.raw);
+    final number = citation.number ?? '·';
+    final url = citation.url;
+    final clickable = url != null;
+    final primary = Theme.of(context).colorScheme.primary;
+
+    return Tooltip(
+      message: clickable
+          ? '${citation.label}\n${url.toString()}'
+          : citation.label,
+      child: MouseRegion(
+        cursor: clickable ? SystemMouseCursors.click : SystemMouseCursors.basic,
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) => setState(() => _hovering = false),
+        child: GestureDetector(
+          onTap: clickable ? () => _open(citation) : null,
+          child: Semantics(
+            link: clickable,
+            label: clickable
+                ? '${citation.label}, otvori izvor'
+                : citation.label,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 160),
+              curve: kEase,
+              padding: const EdgeInsets.fromLTRB(6, 5, 12, 5),
+              decoration: BoxDecoration(
+                color: _hovering
+                    ? kIndigo.withValues(alpha: p.isDark ? 0.26 : 0.11)
+                    : p.surface,
+                borderRadius: BorderRadius.circular(R.pill),
+                border: Border.all(
+                  color: _hovering ? kIndigo.withValues(alpha: 0.4) : p.border,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 19,
+                    height: 19,
+                    alignment: Alignment.center,
+                    decoration: const BoxDecoration(
+                      gradient: kBrandGradient,
+                      shape: BoxShape.circle,
+                    ),
+                    child: Text(
+                      number,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 10,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 400),
+                    child: Text(
+                      citation.label,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: clickable ? primary : p.textSecondary,
+                        decoration: clickable ? TextDecoration.underline : null,
+                        decorationColor: clickable
+                            ? primary.withValues(alpha: 0.45)
+                            : null,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  if (clickable) ...[
+                    const SizedBox(width: 5),
+                    Icon(Icons.open_in_new_rounded, size: 12, color: primary),
+                  ],
+                ],
               ),
             ),
           ),
-          const SizedBox(width: 6),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Text(
-              label,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: isDark
-                    ? const Color(0xFFC7CDFB)
-                    : const Color(0xFF3B3F66),
-              ),
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }
 }
+
+// ---------------------------------------------------------------- accents -- //
 
 class _TypingIndicator extends StatefulWidget {
   const _TypingIndicator();
@@ -320,7 +586,7 @@ class _TypingIndicatorState extends State<_TypingIndicator>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 1000),
+      duration: const Duration(milliseconds: 1200),
     )..repeat();
   }
 
@@ -332,35 +598,41 @@ class _TypingIndicatorState extends State<_TypingIndicator>
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (var i = 0; i < 3; i++)
-              Padding(
-                padding: const EdgeInsets.only(right: 5),
-                child: _dot(
-                  context,
-                  0.75 - 0.25 * ((_controller.value * 3 + i) % 3).abs() * 1.2,
+    final color = Theme.of(context).colorScheme.primary;
+
+    return SizedBox(
+      height: 20,
+      child: AnimatedBuilder(
+        animation: _controller,
+        builder: (context, _) {
+          return Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (var i = 0; i < 3; i++)
+                Padding(
+                  padding: EdgeInsets.only(right: i == 2 ? 0 : 5),
+                  child: _dot(color, i),
                 ),
-              ),
-          ],
-        );
-      },
+            ],
+          );
+        },
+      ),
     );
   }
 
-  Widget _dot(BuildContext context, double t) {
-    final theme = Theme.of(context);
-    return Container(
-      width: 7,
-      height: 7,
-      decoration: BoxDecoration(
-        color: theme.colorScheme.primary
-            .withValues(alpha: (0.3 + 0.7 * t).clamp(0.3, 1.0)),
-        shape: BoxShape.circle,
+  Widget _dot(Color color, int index) {
+    final t = (_controller.value + index * 0.16) % 1.0;
+    final wave = math.sin(t * math.pi);
+
+    return Transform.translate(
+      offset: Offset(0, -3.5 * wave),
+      child: Container(
+        width: 7,
+        height: 7,
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.35 + 0.65 * wave),
+          shape: BoxShape.circle,
+        ),
       ),
     );
   }
@@ -382,7 +654,7 @@ class _StreamingCursorState extends State<_StreamingCursor>
     super.initState();
     _controller = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 600),
+      duration: const Duration(milliseconds: 750),
     )..repeat(reverse: true);
   }
 
@@ -394,17 +666,16 @@ class _StreamingCursorState extends State<_StreamingCursor>
 
   @override
   Widget build(BuildContext context) {
+    final color = Theme.of(context).colorScheme.primary;
+
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, _) => Container(
         width: 8,
         height: 15,
-        margin: const EdgeInsets.only(top: 2),
+        margin: const EdgeInsets.only(top: 3),
         decoration: BoxDecoration(
-          color: Theme.of(context)
-              .colorScheme
-              .primary
-              .withValues(alpha: _controller.value),
+          color: color.withValues(alpha: 0.25 + 0.75 * _controller.value),
           borderRadius: BorderRadius.circular(2),
         ),
       ),

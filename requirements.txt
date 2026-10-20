@@ -4,7 +4,7 @@ transformers>=4.36.0       # Hugging Face models
 bitsandbytes>=0.41.0       # Quantization support
 
 # Vector Database
-chromadb>=0.4.0            # Vector storage
+chromadb==1.5.9            # Vector storage — keep identical to the scraper project
 qdrant-client>=1.7.0       # Alternative vector DB
 
 # Text Processing
@@ -32,7 +32,8 @@ python-docx>=1.0.0         # Word documents
 
 # Utilities
 pydantic>=2.5.0            # Data validation
-redis>=5.0.0               # Caching (optional)
+redis>=5.0.0               # Optional: shared sessions + rate limits (REDIS_URL)
+pyyaml>=6.0                # Golden questions for `run.py eval`
 pdfplumber>=0.9.0            # PDF text extraction
 python-docx>=1.0.0              # Word document processing
 requests>=2.35.0           # HTTP requests

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="sr">
 <head>
   <!--
     If you are serving your web app in a path other than the root, change the
@@ -18,7 +18,10 @@
 
   <meta charset="UTF-8">
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="description" content="UniChat — univerzitetski asistent sa RAG-om za PMF IMI Kragujevac.">
+  <meta name="theme-color" content="#0A0C13" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#F6F7FC" media="(prefers-color-scheme: light)">
 
   <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
@@ -29,10 +32,118 @@
   <!-- Favicon -->
   <link rel="icon" type="image/png" href="favicon.png"/>
 
+  <!-- google_fonts fetches Inter at runtime; warm the connection up early. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
   <title>UniChat — Univerzitetski asistent</title>
   <link rel="manifest" href="manifest.json">
+
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      background: #0A0C13;
+      overflow: hidden;
+    }
+
+    /* Brand splash: covers the blank canvas while the Flutter bundle loads. */
+    #splash {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 22px;
+      background:
+        radial-gradient(60% 55% at 18% 12%, rgba(79, 70, 229, 0.34), transparent 70%),
+        radial-gradient(55% 55% at 84% 88%, rgba(139, 92, 246, 0.30), transparent 70%),
+        #0A0C13;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      transition: opacity 420ms ease;
+    }
+
+    #splash .mark {
+      width: 74px;
+      height: 74px;
+      border-radius: 22px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: linear-gradient(135deg, #4F46E5 0%, #8B5CF6 100%);
+      box-shadow: 0 18px 40px -12px rgba(79, 70, 229, 0.75);
+      font-size: 34px;
+      line-height: 1;
+    }
+
+    #splash .title {
+      color: #E9EBF3;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+    }
+
+    #splash .subtitle {
+      color: #767D94;
+      font-size: 12.5px;
+      letter-spacing: 0.2px;
+    }
+
+    #splash .spinner {
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      border: 2.5px solid rgba(233, 235, 243, 0.14);
+      border-top-color: #8B5CF6;
+      animation: splash-spin 780ms linear infinite;
+    }
+
+    @keyframes splash-spin {
+      to { transform: rotate(360deg); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #splash .spinner { animation-duration: 2s; }
+    }
+  </style>
 </head>
 <body>
+  <div id="splash" role="status" aria-live="polite" aria-label="Učitavanje aplikacije">
+    <div class="mark" aria-hidden="true">🎓</div>
+    <div class="title">UniChat</div>
+    <div class="subtitle">Univerzitetski asistent · PMF IMI Kragujevac</div>
+    <div class="spinner" aria-hidden="true"></div>
+  </div>
+
+  <script>
+    // Remove the splash as soon as Flutter paints its first view, with a
+    // hard timeout so a failed load never leaves the page stuck.
+    (function () {
+      var splash = document.getElementById('splash');
+      if (!splash) return;
+      var hidden = false;
+
+      function dismiss() {
+        if (hidden) return;
+        hidden = true;
+        splash.style.opacity = '0';
+        splash.setAttribute('aria-hidden', 'true');
+        setTimeout(function () { splash.remove(); }, 480);
+      }
+
+      new MutationObserver(function () {
+        if (document.querySelector('flt-glass-pane, flt-scene-host, flutter-view')) {
+          dismiss();
+        }
+      }).observe(document.body, { childList: true, subtree: true });
+
+      setTimeout(dismiss, 20000);
+    })();
+  </script>
+
   <!--
     You can customize the "flutter_bootstrap.js" script.
     This is useful to provide a custom configuration to the Flutter loader
