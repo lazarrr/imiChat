@@ -13,6 +13,10 @@ Both expose the same two interfaces:
 
 Both explicitly set the context window where the backend supports it.
 Streaming is token-by-token from either backend.
+
+Local Ollama calls always pass ``think`` from ``LLM_THINKING`` (off by
+default): reasoning models such as Qwen3.5 otherwise return a long thinking
+block before the answer, which the chatbot does not use.
 """
 
 from __future__ import annotations
@@ -290,6 +294,9 @@ class LLMManager:
         self.repeat_penalty = float(getattr(config, "LLM_REPEAT_PENALTY", 1.2))
         self.repeat_last_n  = int(getattr(config, "LLM_REPEAT_LAST_N", 256))
         self.use_local   = bool(getattr(config, "LLM_USE_LOCAL", False))
+        # Off by default: the chatbot wants the answer, not the reasoning
+        # trace.  Only Ollama takes a per-call `think` flag.
+        self.thinking    = bool(getattr(config, "LLM_THINKING", False))
 
         # Prompt and raw output of the most recent rewrite_query() call, kept
         # for the request log (see src/api/request_log.py).  None until then.
@@ -334,6 +341,17 @@ class LLMManager:
             "repeat_last_n": self.repeat_last_n,
         }
 
+    @property
+    def _thinking_options(self) -> dict:
+        """
+        Per-call reasoning switch for the local Ollama client.
+
+        ``think`` is a top-level request field in Ollama, not a model option,
+        so it has to be passed to every chat/generate call.  The remote
+        OpenAI-compatible backend has no equivalent field, so it gets none.
+        """
+        return {"think": self.thinking} if self.use_local else {}
+
     # ------------------------------------------------------------------ #
     #  Single-turn generation  (simple prompt → completion)              #
     # ------------------------------------------------------------------ #
@@ -345,6 +363,7 @@ class LLMManager:
             prompt=prompt,
             options=self._options,
             stream=False,
+            **self._thinking_options,
         )
         return resp["response"]
 
@@ -355,6 +374,7 @@ class LLMManager:
             prompt=prompt,
             options=self._options,
             stream=True,
+            **self._thinking_options,
         ):
             token = chunk.get("response", "")
             if token:
@@ -375,6 +395,7 @@ class LLMManager:
             messages=messages,
             options=self._options,
             stream=False,
+            **self._thinking_options,
         )
         return resp["message"]["content"]
 
@@ -391,6 +412,7 @@ class LLMManager:
             messages=messages,
             options=self._options,
             stream=True,
+            **self._thinking_options,
         ):
             token = chunk.get("message", {}).get("content", "")
             if token:
@@ -454,6 +476,7 @@ class LLMManager:
             # rewritten question (rewrite, then answer).
             options={"temperature": 0.0, "num_predict": 128, "num_ctx": self.num_ctx},
             stream=False,
+            **self._thinking_options,
         )
         result = resp["response"].strip()
         self.last_rewrite["raw_response"] = result

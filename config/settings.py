@@ -11,14 +11,18 @@ class Settings(BaseSettings):
 
     # LLM Configuration
     LLM_PROVIDER: str = "ollama"  # ollama or llama_cpp
-    LLM_MODEL: str = "llama3.1:latest"  # model on the local Ollama server
+    LLM_MODEL: str = "qwen3.5:9b"  # model on the local Ollama server
     # True  → local Ollama server (LLM_OLLAMA_BASE_URL)
     # False → remote OpenAI-compatible server (LLM_REMOTE_* below)
-    LLM_USE_LOCAL: bool = False
+    LLM_USE_LOCAL: bool = True
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_TOKENS: int = 2048
     LLM_NUM_CTX: int = 8192        # Ollama context window (tokens)
     LLM_OLLAMA_BASE_URL: str = "http://localhost:11434"
+    # Qwen3.5 reasons ("thinks") by default.  The chatbot answers directly, so
+    # the thinking block is switched off on every Ollama call.  Ignored by
+    # models without a thinking mode.
+    LLM_THINKING: bool = False
 
     # Remote OpenAI-compatible LLM (used when LLM_USE_LOCAL=False).
     # BASE_URL is the API root; "/chat/completions" is appended to it.

@@ -2,16 +2,16 @@
 
 A Retrieval-Augmented Generation (RAG) chatbot for the IMI PMF Kragujevac
 university. It reads a shared ChromaDB vector store, retrieves the most
-relevant chunks for a question, and answers using **Llama 3.1 8B** from a
-remote OpenAI-compatible server (or a local [Ollama](https://ollama.com)
-server when `LLM_USE_LOCAL=true`).
+relevant chunks for a question, and answers using **Qwen3.5 9B** from a
+local [Ollama](https://ollama.com) server (or a remote OpenAI-compatible
+server when `LLM_USE_LOCAL=false`).
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 
 ## Features
 
 - RAG pipeline over university documents (HTML, PDF, DOCX)
-- Remote OpenAI-compatible LLM, with local Ollama as a switchable fallback
+- Local Ollama (Qwen3.5 9B), with a remote OpenAI-compatible LLM as a switchable fallback
 - Multi-turn conversations via FastAPI sessions (1-hour TTL)
 - Streaming responses (Server-Sent Events)
 - Query rewriting for follow-up questions
@@ -23,7 +23,7 @@ Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 | Component | Required |
 |---|---|
 | [Conda](https://docs.conda.io) | Environment management |
-| An LLM endpoint | Remote OpenAI-compatible server by default; [Ollama](https://ollama.com) only for local mode (`LLM_USE_LOCAL=true`) |
+| An LLM endpoint | Local [Ollama](https://ollama.com) server with `qwen3.5:9b` by default; remote OpenAI-compatible server when `LLM_USE_LOCAL=false` |
 | Python ≥ 3.10 | Language runtime |
 
 > This guide assumes a conda environment named **`uni`** (already created on the development machine).
@@ -40,9 +40,23 @@ pip install -r requirements.txt
 
 ## 2. Choose the LLM backend
 
-By default the chatbot uses the remote OpenAI-compatible server configured
-in `.env` (`LLM_REMOTE_*`). Copy `.env.example` to `.env` and fill in the
-API key:
+By default the chatbot uses the local Ollama server configured in `.env`
+(`LLM_USE_LOCAL=True`, `LLM_MODEL=qwen3.5:9b`). Copy `.env.example` to
+`.env`, run `ollama serve` in a separate terminal, and pull the model once:
+
+```bash
+ollama serve
+ollama pull qwen3.5:9b
+```
+
+Ollama runs at `http://localhost:11434` by default. Qwen3.5 reasons
+("thinks") by default, so the chatbot sends `think=false` with every call
+(`LLM_THINKING=False`) and streams only the final answer. On first run the
+`intfloat/multilingual-e5-large` embedding model is also downloaded
+(~2.2 GB, one-time).
+
+To use a remote OpenAI-compatible server instead, set `LLM_USE_LOCAL=False`
+and fill in the `LLM_REMOTE_*` settings:
 
 ```dotenv
 LLM_USE_LOCAL=False
@@ -60,18 +74,6 @@ curl -X POST "http://dyres.pmf.kg.ac.rs:11500/v1/chat/completions" \
   -H "Authorization: Bearer $LLM_REMOTE_API_KEY" \
   -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}'
 ```
-
-To use a local Ollama server instead, set `LLM_USE_LOCAL=True`, run
-`ollama serve` in a separate terminal, and pull the model once:
-
-```bash
-ollama serve
-ollama pull llama3.1:latest
-```
-
-Ollama runs at `http://localhost:11434` by default. On first run the
-`intfloat/multilingual-e5-large` embedding model is also downloaded
-(~2.2 GB, one-time).
 
 ## 3. Run the chatbot
 
@@ -167,8 +169,9 @@ environment variables or a `.env` file (see `.env.example`).
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_USE_LOCAL` | `false` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
-| `LLM_MODEL` | `llama3.1:latest` | Local Ollama model (must match `ollama list`) |
+| `LLM_USE_LOCAL` | `true` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
+| `LLM_MODEL` | `qwen3.5:9b` | Local Ollama model (must match `ollama list`) |
+| `LLM_THINKING` | `false` | Reasoning mode; `false` sends `think=false` with every Ollama call |
 | `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | Remote API root; `/chat/completions` is appended |
 | `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
 | `LLM_REMOTE_API_KEY` | *(empty)* | Sent as `Authorization: Bearer <key>` |

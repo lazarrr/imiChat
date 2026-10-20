@@ -8,7 +8,7 @@ university, split into two projects that share a single ChromaDB vector store:
 | Project | What it does |
 |---|---|
 | `scraper` (C:\Projects\scraper) | Crawls the links listed in `links.txt`, parses HTML (incl. every tab panel) / PDF / DOCX, labels each chunk with its location and study-program version, validates + enriches it with DeepSeek, embeds, and writes to ChromaDB. |
-| `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Llama 3.1 8B (remote OpenAI-compatible server, or local Ollama when `LLM_USE_LOCAL=true`). |
+| `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Qwen3.5 9B on a local Ollama server (or a remote OpenAI-compatible server when `LLM_USE_LOCAL=false`). |
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 
@@ -19,7 +19,7 @@ Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 | Component | Required |
 |---|---|
 | **Conda** (Miniconda or Anaconda) | Environment management |
-| **LLM endpoint** | Remote OpenAI-compatible server by default; **Ollama** only for local mode (`LLM_USE_LOCAL=true`) |
+| **LLM endpoint** | Local **Ollama** server by default (`qwen3.5:9b`); remote OpenAI-compatible server as a fallback (`LLM_USE_LOCAL=false`) |
 | **Python** ≥ 3.10 | Language runtime |
 | **Git** | Clone / version control (optional) |
 
@@ -48,8 +48,32 @@ pip install -r requirements.txt
 
 ## 2. LLM backend
 
-**Default: remote OpenAI-compatible server.**  Configure it in
-`university-chatbot/.env`:
+**Default: local Ollama.**  Configure it in `university-chatbot/.env`:
+
+```dotenv
+LLM_USE_LOCAL=True
+LLM_MODEL=qwen3.5:9b
+LLM_OLLAMA_BASE_URL=http://localhost:11434
+LLM_THINKING=False
+```
+
+Run:
+
+```bash
+# Start the Ollama server (keep this running in a separate terminal)
+ollama serve
+
+# Pull the LLM (in another terminal, or before starting the server)
+ollama pull qwen3.5:9b
+```
+
+Ollama runs at `http://localhost:11434` by default; `LLM_MODEL` must match
+`ollama list`.  Qwen3.5 reasons ("thinks") by default, so every Ollama call
+sends `think=false` (`LLM_THINKING=False`); the chatbot streams only the
+final answer.
+
+**Remote OpenAI-compatible server (optional).**  Set `LLM_USE_LOCAL=False`
+and configure the remote endpoint:
 
 ```dotenv
 LLM_USE_LOCAL=False
@@ -58,7 +82,7 @@ LLM_REMOTE_MODEL=llama3.1:8b
 LLM_REMOTE_API_KEY=<your-token>
 ```
 
-The chatbot sends `POST {LLM_REMOTE_BASE_URL}/chat/completions` with an
+The chatbot then sends `POST {LLM_REMOTE_BASE_URL}/chat/completions` with an
 `Authorization: Bearer <key>` header — the same request as:
 
 ```bash
@@ -67,19 +91,6 @@ curl -X POST "http://dyres.pmf.kg.ac.rs:11500/v1/chat/completions" \
   -H "Authorization: Bearer $LLM_REMOTE_API_KEY" \
   -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}'
 ```
-
-**Local Ollama (optional).**  Set `LLM_USE_LOCAL=True` and run:
-
-```bash
-# Start the Ollama server (keep this running in a separate terminal)
-ollama serve
-
-# Pull the LLM (in another terminal, or before starting the server)
-ollama pull llama3.1:latest
-```
-
-Ollama runs at `http://localhost:11434` by default; `LLM_MODEL` must match
-`ollama list`.
 
 The chatbot also downloads `intfloat/multilingual-e5-large` for
 embeddings on first run (≈ 2.2 GB, one-time download).
@@ -104,8 +115,9 @@ via environment variables or a `.env` file.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `LLM_USE_LOCAL` | `false` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
-| `LLM_MODEL` | `llama3.1:latest` | Local Ollama model (must match `ollama list`) |
+| `LLM_USE_LOCAL` | `true` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
+| `LLM_MODEL` | `qwen3.5:9b` | Local Ollama model (must match `ollama list`) |
+| `LLM_THINKING` | `false` | Reasoning mode; `false` sends `think=false` with every Ollama call |
 | `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | Remote API root; `/chat/completions` is appended |
 | `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
 | `LLM_REMOTE_API_KEY` | *(empty)* | Sent as `Authorization: Bearer <key>` |

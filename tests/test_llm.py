@@ -87,6 +87,65 @@ class ContextWindowTests(unittest.TestCase):
 
 
 @unittest.skipIf(llm_manager is None, "ollama not installed")
+class ThinkingTests(unittest.TestCase):
+    """Qwen3.5 thinks by default; every Ollama call must switch it off."""
+
+    def test_every_local_call_disables_thinking(self):
+        manager, client = make_manager(LLM_THINKING=False)
+        client.generate.side_effect = lambda **kwargs: (
+            iter([{"response": "ok"}]) if kwargs["stream"] else {"response": "ok"}
+        )
+        client.chat.side_effect = lambda **kwargs: (
+            iter([ANSWER]) if kwargs["stream"] else ANSWER
+        )
+        messages = [{"role": "user", "content": "Pitanje"}]
+
+        manager.generate("Pitanje")
+        list(manager.generate_stream("Pitanje"))
+        manager.chat(messages)
+        list(manager.chat_stream(messages))
+        manager.rewrite_query(
+            "Korisnik: Koliko ESPB ima Uvod u programiranje?",
+            "Koji su preduslovi za njega?",
+        )
+
+        calls = client.generate.call_args_list + client.chat.call_args_list
+        self.assertEqual(len(calls), 5)
+        self.assertEqual({call.kwargs["think"] for call in calls}, {False})
+
+    def test_thinking_can_be_enabled(self):
+        manager, client = make_manager(LLM_THINKING=True)
+        client.generate.return_value = {"response": "ok"}
+
+        manager.generate("Pitanje")
+
+        self.assertIs(client.generate.call_args.kwargs["think"], True)
+
+    def test_remote_backend_does_not_send_a_think_field(self):
+        # `think` is an Ollama-only request field; the remote
+        # OpenAI-compatible endpoint does not accept it.
+        body = b'{"choices":[{"message":{"content":"ok"}}]}'
+        with patch.object(llm_manager.requests.Session, "post",
+                          return_value=FakeResponse(body)) as post:
+            manager = make_remote_manager(LLM_THINKING=False)
+            manager.chat([{"role": "user", "content": "Pitanje"}])
+
+        self.assertNotIn("think", post.call_args.kwargs["json"])
+
+
+@unittest.skipIf(llm_manager is None, "ollama not installed")
+class SettingsDefaultsTests(unittest.TestCase):
+    def test_defaults_target_local_qwen_without_thinking(self):
+        from config.settings import Settings
+
+        settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.LLM_MODEL, "qwen3.5:9b")
+        self.assertTrue(settings.LLM_USE_LOCAL)
+        self.assertFalse(settings.LLM_THINKING)
+
+
+@unittest.skipIf(llm_manager is None, "ollama not installed")
 class RewritePromptTests(unittest.TestCase):
     HISTORY = (
         "Korisnik: Koliko ESPB ima Uvod u programiranje?\n"
