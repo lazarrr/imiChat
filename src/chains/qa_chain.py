@@ -48,6 +48,9 @@ import re
 import time
 from collections.abc import AsyncGenerator, Iterator
 
+from src.processing.serbian_text import SerbianAnswerNormalizer
+from src.processing.translator import normalize_script
+
 logger = logging.getLogger(__name__)
 
 # ── referential / unclear question markers (Serbian Latin + English) ── #
@@ -112,18 +115,58 @@ def _source_key(meta: dict) -> tuple:
 
 
 class UniversityQASystem:
-    # System prompt sent as the first message in every /api/chat call
+    # System prompt sent as the first message in every /api/chat call.
+    #
+    # The prompt itself is written in correct Serbian Latin with diacritics:
+    # a prompt full of "latinicno", "prekidas" and "referneciraj" teaches a
+    # small model exactly the wrong spelling.  The explicit script rule and
+    # the output normaliser guarantee the script even if the model ignores
+    # it.  Keep the structure simple: a heavily restructured prompt made
+    # this quantised Qwen model degenerate into mixed-script output.
     SYSTEM_PROMPT = (
         "Vi ste korisni univerzitetski asistent. Odgovarajte na pitanja "
-        "na osnovu prilozenog konteksta iskljucivo na srpskom latinicnom pismu. "
-        "Ako informacija nije u kontekstu, jasno to navedite sa odgovorom da nemate "
-        "informaciju i tu prekidas sa komunikacijom i ne prikazuj izvore. "
-        "Kada koristite informacije iz konteksta, referneciraj izvore. "
-        "Zaglavlje svakog izvora navodi verziju studijskog programa i njen status "
-        "(npr. 'akreditacija 2026 | aktuelni program (upis u toku)' ili "
-        "'akreditacija 2019 | prethodni program'). Ako kontekst sadrzi podatke za "
-        "vise verzija studijskog programa, za svaki podatak navedi na koju verziju "
-        "se odnosi i prvo navedi program za koji je upis u toku. "
+        "isključivo na srpskom jeziku i latiničnim pismom (č, ć, š, ž, đ).\n\n"
+        "PISMO I JEZIK:\n"
+        "- Uvek pišite latinicom. Nikada ne prelazite na ćirilicu, čak i kada "
+        "su pitanje ili kontekst na ćirilici — ćirilične delove prenesite "
+        "latinicom.\n"
+        "- Poštujte srpski pravopis: ne izostavljajte dijakritike (č, ć, š, ž, "
+        "đ) i ne izmišljajte reči. Pazite na rod, broj i padež.\n"
+        "- Koristite srpski ekavski izgovor i srpske oblike reči, ne hrvatske "
+        "ili ijekavske: smer (ne smjer), vreme (ne vrijeme), mesto (ne "
+        "mjesto), četvorogodišnji (ne četverogodišnji), studijskog (ne "
+        "studijskoga).\n"
+        "- Ne ubacujte engleske reči i izraze; napišite „kao i“, ne „kao well "
+        "kao“.\n"
+        "- Koristite nazive tačno onako kako su napisani u kontekstu; ne "
+        "menjajte ih i ne prevodite ih.\n"
+        "- Skraćenice: OAS = osnovne akademske studije, ESPB = evropski sistem "
+        "prenosa bodova. Pišite „240 ESPB“ ili „240 ESPB bodova“, a ne "
+        "„240 evropskih sistema prenosa bodova“.\n"
+        "- Česte greške ispravljajte ovako: studijama (ne studiama), prijemni "
+        "ispit (ne prijemi ispit), prijemnih ispita (ne prijmnih ispita), "
+        "Softversko inženjerstvo (ne inženjering), informacioni servis / "
+        "informacionog servisa (ne informacijski), najkasnije (ne najkasnje), "
+        "osnovnih (ne osnivnih), kratak vodič (ne kratik vodić), studentima / "
+        "studenata (ne studenta).\n"
+        "- Odgovarajte direktno. Ne pominjite kontekst ni dokumentaciju; "
+        "odmah navedite odgovor.\n\n"
+        "AKO INFORMACIJA NIJE DOSTUPNA:\n"
+        "- Ako informaciju ne možete da pronađete, napišite samo „Nemam "
+        "informaciju o tome.“, bez objašnjenja i bez pominjanja konteksta. "
+        "Nemojte nagađati i nemojte navoditi izvore.\n\n"
+        "IZVORI:\n"
+        "- Kada koristite informacije iz priloženih izvora, navedite izvor u "
+        "obliku [Izvor N], a ne [N].\n"
+        "- Zaglavlje svakog izvora navodi verziju studijskog programa i njen "
+        "status (npr. „akreditacija 2026 | aktuelni program (upis u toku)“ ili "
+        "„akreditacija 2019 | prethodni program“). Ako kontekst sadrži podatke "
+        "za više verzija studijskog programa, za svaki podatak navedite na "
+        "koju se verziju odnosi i prvo navedite program za koji je upis u "
+        "toku.\n\n"
+        "PRIMER:\n"
+        "Pitanje: „Koliko traje OAS Informatika?“\n"
+        "Odgovor: „Studije traju četiri godine [Izvor 1].“"
     )
 
     def __init__(self, llm_manager, vector_store, translator):
@@ -132,13 +175,63 @@ class UniversityQASystem:
         self.translator   = translator
 
     # ------------------------------------------------------------------ #
+    #  Script helpers                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _to_latinic(self, text: str) -> str:
+        """Convert text to Serbian Latin with the configured translator."""
+        if not text:
+            return text
+        for name in ("to_latinic", "cyrillic_to_latinic", "normalize_query"):
+            converter = getattr(self.translator, name, None)
+            if callable(converter):
+                converted = converter(text)
+                return converted if isinstance(converted, str) else text
+        return text
+
+    def _to_script(self, text: str, script: str = "latinic") -> str:
+        """Return text in the requested output script (Latin by default)."""
+        if not text:
+            return text
+        if normalize_script(script) == "cyrillic":
+            converter = getattr(self.translator, "latinic_to_cyrillic", None)
+            if callable(converter):
+                return converter(self._to_latinic(text))
+        return self._to_latinic(text)
+
+    def _filename_in_script(self, filename: str, script: str) -> str:
+        """
+        Transliterate a file name for display, keeping its extension.
+
+        A full Latin→Cyrillic conversion would turn ``.pdf`` into ``.пдф``;
+        the suffix is machine-facing, so it stays ASCII.
+        """
+        latin = self._to_latinic(filename)
+        if normalize_script(script) != "cyrillic":
+            return latin
+        stem, dot, suffix = latin.rpartition(".")
+        if dot and suffix and len(suffix) <= 5 and suffix.isalnum():
+            return f"{self._to_script(stem, script)}.{suffix}"
+        return self._to_script(latin, script)
+
+    def _answer_normalizer(
+        self, documents: list[str], script: str = "latinic",
+    ) -> SerbianAnswerNormalizer:
+        """Build the per-answer normaliser, using the chunks as vocabulary."""
+        return SerbianAnswerNormalizer(self.translator, documents, script)
+
+    # ------------------------------------------------------------------ #
     #  Source formatting                                                   #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _format_source(meta: dict, index: int) -> str:
+    def _format_source(
+        self, meta: dict, index: int, script: str = "latinic",
+    ) -> str:
         """
         Turn a single chunk's metadata dict into a numbered citation line.
+
+        The file name follows the requested output script; an URL is kept
+        verbatim so it stays clickable.
 
         Examples
         --------
@@ -146,7 +239,10 @@ class UniversityQASystem:
         [2] Uvod u baze podataka.docx
         [3] Osnovi programiranja — https://example.com/article
         """
-        filename = meta.get("filename") or meta.get("source", "Nepoznat izvor")
+        filename = self._filename_in_script(
+            meta.get("filename") or meta.get("source", "Nepoznat izvor"),
+            script,
+        )
         doc_type = meta.get("type", "")
         page     = meta.get("page", 0)
         url      = meta.get("url", "")
@@ -154,14 +250,17 @@ class UniversityQASystem:
         parts = [f"[{index}] {filename}"]
 
         if doc_type == "pdf" and page:
-            parts.append(f"strana {page}")
+            page_label = "страна" if normalize_script(script) == "cyrillic" else "strana"
+            parts.append(f"{page_label} {page}")
 
         if url:
             parts.append(url)
 
         return " — ".join(parts)
 
-    def _format_sources(self, metadatas: list[dict]) -> list[str]:
+    def _format_sources(
+        self, metadatas: list[dict], script: str = "latinic",
+    ) -> list[str]:
         """
         Deduplicate and format all sources for a query result.
         Deduplication key: _source_key() (source path / URL + page), so we
@@ -177,7 +276,7 @@ class UniversityQASystem:
             if key in seen:
                 continue
             seen.add(key)
-            sources.append(self._format_source(meta, len(sources) + 1))
+            sources.append(self._format_source(meta, len(sources) + 1, script))
 
         return sources
 
@@ -194,19 +293,25 @@ class UniversityQASystem:
             and not _CITATION_REGEX.search(answer)
         )
 
-    def _answer_sources(self, answer: str, metadatas: list[dict]) -> list[str]:
-        """Citation lines for an answer — none for a "no information" answer."""
-        if self._is_no_info_answer(answer):
+    def _answer_sources(
+        self, answer: str, metadatas: list[dict], script: str = "latinic",
+    ) -> list[str]:
+        """
+        Citation lines for an answer — none for a "no information" answer.
+
+        The no-information check runs on the Latin form, so it works even
+        when the client requested Cyrillic output.
+        """
+        if self._is_no_info_answer(self._to_latinic(answer)):
             logger.info("No-information answer — sources omitted")
             return []
-        return self._format_sources(metadatas)
+        return self._format_sources(metadatas, script)
 
     # ------------------------------------------------------------------ #
     #  Context building                                                    #
     # ------------------------------------------------------------------ #
 
-    @staticmethod
-    def _build_context(documents: list[str], metadatas: list[dict]) -> str:
+    def _build_context(self, documents: list[str], metadatas: list[dict]) -> str:
         """
         Interleave each chunk with a small inline source tag so the LLM
         can reference specific sources in its answer.
@@ -214,6 +319,10 @@ class UniversityQASystem:
         Chunks from the same source share one number, in order of first
         appearance — the numbering _format_sources() uses, so "[Izvor 2]"
         in an answer is line [2] of the Izvori block.
+
+        The answering model always receives Latin text, even when a chunk
+        was indexed in Cyrillic: a Cyrillic context is the strongest trigger
+        for the model to switch scripts.
 
         Example:
             [Izvor 1 — lecture_notes.pdf, strana 4]
@@ -223,7 +332,9 @@ class UniversityQASystem:
         parts:   list[str]        = []
         for doc, meta in zip(documents, metadatas):
             number   = numbers.setdefault(_source_key(meta), len(numbers) + 1)
-            filename = meta.get("filename") or meta.get("source", "")
+            filename = self._to_latinic(
+                meta.get("filename") or meta.get("source", "")
+            )
             page     = meta.get("page", 0)
             url      = meta.get("url", "")
 
@@ -234,7 +345,7 @@ class UniversityQASystem:
             else:
                 label = filename
 
-            parts.append(f"[Izvor {number} — {label}]\n{doc}")
+            parts.append(f"[Izvor {number} — {label}]\n{self._to_latinic(doc)}")
 
         return "\n\n".join(parts)
 
@@ -416,11 +527,16 @@ class UniversityQASystem:
         history_text = ""
 
         with self._stage(trace, "rewrite"):
-            history_text = self._format_history_for_rewrite(history)
+            history_text = self._to_latinic(
+                self._format_history_for_rewrite(history)
+            )
             if not history_text.strip():
                 reason = "no_history"
             else:
                 rewritten = self.llm_manager.rewrite_query(history_text, question)
+                # The rewrite inherits the model's script habits; force it
+                # back to Latin before the guards compare it with the input.
+                rewritten = self._to_latinic(rewritten)
                 details = getattr(self.llm_manager, "last_rewrite", None) or {}
                 raw = details.get("raw_response", rewritten)
                 logger.info("Query rewrite: %r → %r", question, rewritten)
@@ -474,13 +590,14 @@ class UniversityQASystem:
 
         Returns ``(question_to_use, unclear)``.  Only an unclear follow-up
         (see ``_UNCLEAR_PATTERNS``) with existing history is rewritten;
-        every other question is used exactly as typed.
+        every other question is used as typed, converted to Latin because
+        that is what the answering model must receive.
 
         With ``trace``, the normalization and the unclear-verdict (with the
         pattern that matched) are recorded — that pair is what explains why
         a question was or was not rewritten.
         """
-        normalized = self.translator.normalize_query(question)
+        normalized = self._to_latinic(question)
         match = _UNCLEAR_REGEX.search(normalized)
         has_history = bool(history)
 
@@ -489,23 +606,25 @@ class UniversityQASystem:
                 trace["rewrite"] = {
                     "question_in": question,
                     "normalized": normalized,
-                    "history_text": self._format_history_for_rewrite(history) if has_history else "",
+                    "history_text": self._to_latinic(
+                        self._format_history_for_rewrite(history)
+                    ) if has_history else "",
                     "prompt": None,
                     "raw_response": None,
-                    "question_out": question,
+                    "question_out": normalized,
                     "changed": False,
                     "result": "skipped_no_history" if not has_history
                               else "skipped_clear_question",
                     "matched_pattern": match.group(0) if match else None,
                     "rejected": None,
                 }
-            return question, False
+            return normalized, False
 
-        search_question = self._standalone_question(question, history, trace)
+        search_question = self._standalone_question(normalized, history, trace)
         if trace is not None:
             trace["rewrite"]["normalized"] = normalized
             trace["rewrite"]["matched_pattern"] = match.group(0)
-        return search_question, True
+        return self._to_latinic(search_question), True
 
     # ------------------------------------------------------------------ #
     #  Message list builder                                                #
@@ -696,6 +815,7 @@ class UniversityQASystem:
         conversation_history: list[dict[str, str]] | None = None,
         k: int | None = None,
         trace: dict | None = None,
+        script: str = "latinic",
     ) -> dict:
         """
         Retrieve relevant chunks, build a grounded prompt, call the LLM,
@@ -716,6 +836,10 @@ class UniversityQASystem:
             Optional dict filled with the pipeline trace — the rewrite, every
             retrieval attempt, the chunks and the prompt sent to the model
             (see the "Optional pipeline trace" section).
+        script : str
+            Output script: ``"latinic"`` (default) or ``"cyrillic"``.  The
+            model itself always writes Latin; the answer is transliterated
+            deterministically at the end.
 
         Returns
         -------
@@ -726,6 +850,9 @@ class UniversityQASystem:
         }
         """
         history = conversation_history or []
+        script = normalize_script(script)
+        if trace is not None:
+            trace["script"] = script
 
         # ── Step 1: Rewrite the question if it refers back ────────────── #
         search_question, unclear = self._resolve_question(question, history, trace)
@@ -747,9 +874,13 @@ class UniversityQASystem:
             )
 
         if not documents:
+            fallback = (
+                "Nisam pronašao relevantne informacije u bazi znanja "
+                "za ovo pitanje."
+            )
             return {
                 "question": question,
-                "answer":   "Nisam pronasao relevantne informacije u bazi znanja za ovo pitanje.",
+                "answer":   self._to_script(fallback, script),
                 "sources":  [],
             }
 
@@ -760,9 +891,10 @@ class UniversityQASystem:
         self._record_messages(trace, messages)
 
         # ── Step 4: Call LLM via /api/chat ────────────────────────────── #
+        normalizer = self._answer_normalizer(documents, script)
         with self._stage(trace, "answer"):
-            response = self.llm_manager.chat(messages)
-        sources  = self._answer_sources(response, metadatas)
+            response = normalizer.normalize(self.llm_manager.chat(messages))
+        sources  = self._answer_sources(response, metadatas, script)
         if trace is not None:
             trace["sources"] = sources
 
@@ -781,6 +913,7 @@ class UniversityQASystem:
         question: str,
         conversation_history: list[dict[str, str]] | None = None,
         trace: dict | None = None,
+        script: str = "latinic",
     ) -> AsyncGenerator[str, None]:
         """
         Stream response tokens — sources are yielded as a trailing block.
@@ -803,11 +936,15 @@ class UniversityQASystem:
             Optional dict filled with the pipeline trace (see the "Optional
             pipeline trace" section).  Complete once the stream is
             exhausted, because ``timings_ms['total']`` is written last.
+        script : str
+            Output script: ``"latinic"`` (default) or ``"cyrillic"``.
         """
         # A copy: the session store may append to its list while a worker
         # thread is still reading this one.
         started = time.perf_counter()
-        tokens = self._stream_answer(question, list(conversation_history or []), trace)
+        tokens = self._stream_answer(
+            question, list(conversation_history or []), trace, script=script,
+        )
         try:
             while True:
                 token = await asyncio.to_thread(next, tokens, _END_OF_STREAM)
@@ -824,9 +961,13 @@ class UniversityQASystem:
 
     def _stream_answer(
         self, question: str, history: list[dict[str, str]],
-        trace: dict | None = None,
+        trace: dict | None = None, script: str = "latinic",
     ) -> Iterator[str]:
         """Blocking generator behind query_stream()."""
+        script = normalize_script(script)
+        if trace is not None:
+            trace["script"] = script
+
         # ── Step 1: Rewrite the question if it refers back ────────────── #
         search_question, unclear = self._resolve_question(question, history, trace)
 
@@ -847,7 +988,11 @@ class UniversityQASystem:
             )
 
         if not documents:
-            yield "Nisam pronasao relevantne informacije u bazi znanja za ovo pitanje."
+            fallback = (
+                "Nisam pronašao relevantne informacije u bazi znanja "
+                "za ovo pitanje."
+            )
+            yield self._to_script(fallback, script)
             return
 
         # ── Step 3: Build messages — question + chunks, no history ────── #
@@ -857,15 +1002,27 @@ class UniversityQASystem:
         self._record_messages(trace, messages)
 
         # ── Step 4: Stream from /api/chat ─────────────────────────────── #
+        # Tokens pass through the normaliser; the last, possibly incomplete
+        # word is held back so it is corrected as a whole and flushed after
+        # the model's stream ends.
+        normalizer = self._answer_normalizer(documents, script)
         answer: list[str] = []
         with self._stage(trace, "answer"):
             for token in self.llm_manager.chat_stream(messages):
-                answer.append(token)
-                yield token
+                ready = normalizer.feed(token)
+                if ready:
+                    answer.append(ready)
+                    yield ready
+        tail = normalizer.flush()
+        if tail:
+            answer.append(tail)
+            yield tail
 
         # ── Step 5: Append sources block ──────────────────────────────── #
-        sources = self._answer_sources("".join(answer), metadatas)
+        sources = self._answer_sources("".join(answer), metadatas, script)
         if trace is not None:
             trace["sources"] = sources
         if sources:
+            # The "Izvori:" marker stays Latin: it is the API/UI contract
+            # (web_ui/lib/models/conversation.dart), not model text.
             yield "\n\n---\nIzvori:\n" + "\n".join(sources)

@@ -67,11 +67,13 @@ def chat_loop():
             break
         if question.lower() == "novo":
             conversation_history = []
-            print("Zapocet novi razgovor.")
+            print("Započet novi razgovor.")
             continue
         if not question:
             continue
-        response = qa_system.query(question, conversation_history)
+        response = qa_system.query(
+            question, conversation_history, script=settings.DEFAULT_SCRIPT,
+        )
         print_response(response)
         conversation_history.append({"role": "user", "content": question})
         conversation_history.append({"role": "assistant", "content": response["answer"]})

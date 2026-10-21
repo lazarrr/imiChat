@@ -115,7 +115,10 @@ def _clean_answer(answer: str) -> str:
 class ChatRequest(BaseModel):
     question: str
     session_id: str | None = None   # <-- NEW: pass to enable multi-turn
-    script: str = "latinic"         # cyrillic or latinic
+    # Output script: "latinic" (default) or "cyrillic".  Left unset, the
+    # DEFAULT_SCRIPT setting decides.  The model always writes Latin and the
+    # answer is transliterated deterministically afterwards.
+    script: str | None = None
     language: str = "sr"            # sr, mk, bg
 
 
@@ -163,7 +166,12 @@ async def chat_stream(payload: ChatRequest, request: Request):
     """Stream response token by token (SSE)."""
     try:
         return StreamingResponse(
-            _stream_response(payload.question, payload.session_id, request),
+            _stream_response(
+                payload.question,
+                payload.session_id,
+                request,
+                payload.script or settings.DEFAULT_SCRIPT,
+            ),
             media_type="text/event-stream",
         )
     except Exception as e:
@@ -174,6 +182,7 @@ async def _stream_response(
     question: str,
     session_id: str | None = None,
     request: Request | None = None,
+    script: str = "latinic",
 ) -> AsyncGenerator[str, None]:
     """
     Core streaming logic:
@@ -229,7 +238,9 @@ async def _stream_response(
 
     try:
         history = session_store.get_history(session_id)
-        async for token in qa_system.query_stream(question, history, trace):
+        async for token in qa_system.query_stream(
+            question, history, trace, script=script,
+        ):
             accumulated.append(token)
             yield f"data: {json.dumps({'token': token})}\n\n"
 

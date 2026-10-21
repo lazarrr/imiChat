@@ -143,6 +143,7 @@ class SettingsDefaultsTests(unittest.TestCase):
         self.assertEqual(settings.LLM_MODEL, "qwen3.5:9b")
         self.assertTrue(settings.LLM_USE_LOCAL)
         self.assertFalse(settings.LLM_THINKING)
+        self.assertEqual(settings.DEFAULT_SCRIPT, "latinic")
 
 
 @unittest.skipIf(llm_manager is None, "ollama not installed")

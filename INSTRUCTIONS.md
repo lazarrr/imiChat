@@ -11,6 +11,9 @@ university, split into two projects that share a single ChromaDB vector store:
 | `university-chatbot` | Reads the shared ChromaDB store, retrieves relevant chunks, and answers questions via Qwen3.5 9B on a local Ollama server (or a remote OpenAI-compatible server when `LLM_USE_LOCAL=false`). |
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
+The model is instructed to write Latin; the chain transliterates any answer
+that ignores that rule and restores dropped diacritics from the retrieved
+context.
 
 ---
 
@@ -118,6 +121,7 @@ via environment variables or a `.env` file.
 | `LLM_USE_LOCAL` | `true` | `true` = local Ollama, `false` = remote OpenAI-compatible server |
 | `LLM_MODEL` | `qwen3.5:9b` | Local Ollama model (must match `ollama list`) |
 | `LLM_THINKING` | `false` | Reasoning mode; `false` sends `think=false` with every Ollama call |
+| `DEFAULT_SCRIPT` | `latinic` | Output script (`latinic` or `cyrillic`); the model always writes Latin and the answer is transliterated afterwards |
 | `LLM_REMOTE_BASE_URL` | `http://dyres.pmf.kg.ac.rs:11500/v1` | Remote API root; `/chat/completions` is appended |
 | `LLM_REMOTE_MODEL` | `llama3.1:8b` | Model name on the remote server |
 | `LLM_REMOTE_API_KEY` | *(empty)* | Sent as `Authorization: Bearer <key>` |
@@ -333,7 +337,8 @@ C:\Projects\
 │   │   ├── processing/
 │   │   │   ├── document_loader.py # PDF/DOCX/Web loaders
 │   │   │   ├── text_splitter.py
-│   │   │   └── translator.py    # Cyrillic ↔ Latin conversion
+│   │   │   ├── translator.py    # Cyrillic ↔ Latin conversion / script selection
+│   │   │   └── serbian_text.py  # Answer normaliser (script, diacritics, citations)
 │   │   └── utils/
 │   │       └── retrieval_eval.py # `run.py eval` — hit@k / MRR on golden questions
 │   └── data/vector_store/       # ← SHARED ChromaDB persist directory
@@ -342,6 +347,36 @@ C:\Projects\
 ---
 
 ## 8. Key design details
+
+### Serbian language and script (hard guarantee)
+
+The local model writes good Serbian most of the time, but it can switch to
+Cyrillic (especially when the question or a chunk is Cyrillic) and it
+occasionally drops diacritics or uses the wrong word form.  The pipeline
+handles this in three layers:
+
+1. **Latin input** — the question and every retrieved chunk are transliterated
+   to Latin before the answering model sees them (`ScriptTranslator`).  A
+   Cyrillic page can no longer prime the model to answer in Cyrillic.
+2. **Prompt rules** — `SYSTEM_PROMPT` is written in correct Serbian Latin and
+   explicitly forbids Cyrillic, ijekavica/Croatian forms and code-switching,
+   lists the ESPB/OAS abbreviations, and names the common mistakes the local
+   model makes (`studiama`, `prijemi ispit`, `inženjering`, `najkasnje`, …).
+3. **Post-processing** — every answer (streamed token by token or complete)
+   goes through `SerbianAnswerNormalizer`: Cyrillic → Latin, mixed-script
+   token glitches repaired, missing diacritics restored from the retrieved
+   chunks, bare `[1]` citations expanded to `[Izvor 1]`, punctuation/
+   whitespace normalised, and a small, documented terminology fix-up.
+   Ambiguous words (both `sto` and `što` in the context) are left untouched.
+   The normaliser also removes context boilerplate („Na osnovu priloženog
+   konteksta“, „Prema dokumentaciji“, „Kontekst navodi da …“) and turns a
+   context-only no-information answer into the direct „Nemam informaciju o
+   tome.“
+
+`DEFAULT_SCRIPT` (CLI) and the API's `script` field choose the output script:
+the model always writes Latin, and the answer is transliterated to Cyrillic
+only when explicitly requested.  The `Izvori:` marker stays Latin because it
+is the API/UI contract.
 
 ### E5 model prefixes (CRITICAL)
 
@@ -450,5 +485,5 @@ block; an answer saying there is no information gets no block.
 | Empty answers / "Nisam pronašao..." | Run the scraper first to populate the vector store; check `VECTOR_DB_PATH` and `CHROMA_COLLECTION` match |
 | New scraper data not visible | Restart the chatbot after every ingest (each process caches the Chroma index) |
 | Streaming doesn't work (full response at once) | Remote mode uses SSE; local mode needs `langchain-community` — `ChatOllama` handles token-by-token streaming |
-| Cyrillic answers when you want Latin | Set `DEFAULT_SCRIPT=latinic` or pass `"script":"latinic"` in the API request |
+| Cyrillic answers when you want Latin | Answers are transliterated automatically; set `DEFAULT_SCRIPT=latinic` or pass `"script":"latinic"` in the API request |
 | ChromaDB version mismatch | Both projects must use the **same** `chromadb` version — check with `pip show chromadb` |

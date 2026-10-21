@@ -7,6 +7,9 @@ local [Ollama](https://ollama.com) server (or a remote OpenAI-compatible
 server when `LLM_USE_LOCAL=false`).
 
 Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
+The model is instructed to write Latin, and the chain transliterates any
+answer that ignores that rule and restores dropped diacritics from the
+retrieved context.
 
 ## Features
 
@@ -15,7 +18,9 @@ Answers are in **Serbian (Latin script)** with inline `[Izvor N]` citations.
 - Multi-turn conversations via FastAPI sessions (1-hour TTL)
 - Streaming responses (Server-Sent Events)
 - Query rewriting for follow-up questions
-- Serbian Cyrillic ↔ Latin conversion
+- Deterministic Serbian script normalisation (Cyrillic → Latin, guaranteed)
+- Diacritic restoration and terminology clean-up for model answers
+- Direct answers (no „Na osnovu priloženog konteksta“ boilerplate)
 - CLI and API interfaces
 
 ## Prerequisites
@@ -74,6 +79,20 @@ curl -X POST "http://dyres.pmf.kg.ac.rs:11500/v1/chat/completions" \
   -H "Authorization: Bearer $LLM_REMOTE_API_KEY" \
   -d '{"model":"llama3.1:8b","messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+### Serbian output
+
+The answering model is asked for Serbian Latin, and both the question and the
+retrieved chunks are transliterated to Latin before they reach it — a
+Cyrillic page or question can no longer prime it to answer in Cyrillic.  As a
+hard guarantee, every answer passes through `SerbianAnswerNormalizer`
+(`src/processing/serbian_text.py`): Cyrillic → Latin, mixed-script token
+glitches repaired, missing diacritics restored from the retrieved chunks,
+bare `[1]` citations expanded to `[Izvor 1]`, and a small terminology fix-up.
+Answers are direct: intros such as „Na osnovu priloženog konteksta“ or
+„Prema dokumentaciji“ are removed, and a no-information answer is just
+„Nemam informaciju o tome.“  `DEFAULT_SCRIPT` and the API's `script` field
+select the output script.
 
 ## 3. Run the chatbot
 
@@ -195,7 +214,7 @@ environment variables or a `.env` file (see `.env.example`).
 | `RERANKER_ENABLED` | `false` | Better retrieval: re-score candidates with `RERANKER_MODEL` (default `BAAI/bge-reranker-v2-m3`) on `RERANKER_DEVICE` (`cpu` / `cuda`) |
 | `RERANKER_MIN_SCORE` | `0.0` | Drop chunks the reranker scores below this (0–1); `0` = keep all |
 | `EVAL_QUESTIONS_FILE` | `../scraper/eval_questions.yaml` | Golden questions for `python run.py eval` |
-| `DEFAULT_SCRIPT` | `latinc` | `latinc` or `cyrillic` |
+| `DEFAULT_SCRIPT` | `latinic` | `latinic` (default) or `cyrillic`; the model always writes Latin and the answer is transliterated afterwards |
 | `API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | API server |
 | `RATE_LIMIT` | `100` | `/chat` requests per minute per client IP (`0` = no limit); HTTP 429 above it |
 | `REDIS_URL` | *(unset)* | Optional, e.g. `redis://localhost:6379/0` — sessions and rate limits shared by all workers and kept across restarts (otherwise in memory) |
@@ -314,7 +333,8 @@ variant, then hit@k, MRR and seconds per question for each variant.
 │   ├── processing/
 │   │   ├── document_loader.py # PDF/DOCX/Web loaders
 │   │   ├── text_splitter.py
-│   │   └── translator.py      # Cyrillic ↔ Latin conversion
+│   │   ├── translator.py      # Cyrillic ↔ Latin / script selection
+│   │   └── serbian_text.py    # Answer normaliser (script, diacritics, citations)
 │   └── utils/
 │       └── retrieval_eval.py  # `run.py eval` — hit@k / MRR on golden questions
 ├── data/
@@ -349,7 +369,7 @@ variant, then hit@k, MRR and seconds per question for each variant.
 | Ollama connection refused | Only applies to local mode: set `LLM_USE_LOCAL=false` to use the remote server, or start `ollama serve` in another terminal |
 | Empty answers / "Nisam pronašao..." | Populate the vector store first; check `VECTOR_DB_PATH` |
 | Streaming returns a single chunk | Ensure `langchain-community` is installed |
-| Cyrillic answers when you want Latin | Set `DEFAULT_SCRIPT=latinc` or pass `"script":"latinic"` in the API request |
+| Cyrillic answers when you want Latin | Answers are transliterated automatically; `DEFAULT_SCRIPT=latinic` (default) and `"script":"latinic"` select Latin explicitly |
 
 ## Web UI (Flutter)
 

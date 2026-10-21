@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     EVAL_QUESTIONS_FILE: str = "../scraper/eval_questions.yaml"  # golden questions for `run.py eval`
     
     # Translation
-    DEFAULT_SCRIPT: str = "latinc"  # or "cyrillic"
+    DEFAULT_SCRIPT: str = "latinic"  # latinic (default) or cyrillic; the model always writes Latin
     
     # API
     API_HOST: str = "0.0.0.0"

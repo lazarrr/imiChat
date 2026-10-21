@@ -178,7 +178,7 @@ class QuestionHandlingTests(unittest.TestCase):
         tokens = collect(qa.query_stream("Daj mi više informacija o njima", HISTORY))
 
         self.assert_only_question_and_chunks(llm.chat_stream.call_args.args[0], REWRITTEN)
-        self.assertEqual(tokens[:2], ["Odg", "ovor."])
+        self.assertEqual(tokens[0], "Odgovor.")
         self.assertIn("Izvori:", tokens[-1])
 
     def test_short_question_accepts_long_rewrite(self):
@@ -467,7 +467,7 @@ class TraceTests(unittest.TestCase):
             await stream.aclose()  # client hung up
             return first
 
-        self.assertEqual(asyncio.run(stop_after_first_token()), "Odg")
+        self.assertEqual(asyncio.run(stop_after_first_token()), "Odgovor.")
         # Whatever did run is still logged, so the turn is diagnosable.
         self.assertEqual(trace["search_question"], REWRITTEN)
         self.assertEqual(trace["rewrite"]["result"], "accepted")
@@ -509,6 +509,125 @@ class SourceNumberingTests(unittest.TestCase):
             "[2] Upis — https://imi.pmf.kg.ac.rs/upis",
             "[3] a.pdf — strana 2",
         ])
+
+
+@unittest.skipUnless(HAS_TRANSLATOR_DEPS, "cyrtranslit / langdetect not installed")
+class SerbianScriptTests(unittest.TestCase):
+    """The model boundary is Latin even when the client/content is Cyrillic."""
+
+    CYRILLIC_CHUNK = "Студије информатике трају четири године."
+    CYRILLIC_FILENAME = "Увод у програмирање.pdf"
+
+    def make_cyrillic_system(self):
+        from src.processing.translator import ScriptTranslator
+
+        qa, llm, store = make_system(translator=ScriptTranslator())
+        meta = dict(CHUNK_META, filename=self.CYRILLIC_FILENAME)
+        store.similarity_search.return_value = {
+            "documents": [[self.CYRILLIC_CHUNK]],
+            "metadatas": [[meta]],
+            "distances": [[0.21]],
+            "excluded": [],
+            "excluded_total": 0,
+        }
+        return qa, llm, store
+
+    def test_cyrillic_question_and_chunks_reach_the_model_in_latin(self):
+        qa, llm, _ = self.make_cyrillic_system()
+
+        qa.query("Колико трају студије информатике?")
+
+        messages = llm.chat.call_args.args[0]
+        user_content = messages[1]["content"]
+        self.assertNotRegex(user_content, r"[\u0400-\u04FF]")
+        self.assertIn("Koliko traju studije informatike?", user_content)
+        self.assertIn("Studije informatike traju četiri godine.", user_content)
+        self.assertIn("Uvod u programiranje.pdf", user_content)
+
+    def test_cyrillic_answer_and_source_are_latin(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat.return_value = "Студије трају четири године [Извор 1]."
+
+        result = qa.query("Колико трају студије?")
+
+        self.assertEqual(
+            result["answer"], "Studije traju četiri godine [Izvor 1]."
+        )
+        self.assertEqual(
+            result["sources"], ["[1] Uvod u programiranje.pdf — strana 3"]
+        )
+
+    def test_cyrillic_stream_is_latin(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat_stream.side_effect = lambda messages: iter([
+            "Студије ", "трају ", "четири ", "године.",
+        ])
+
+        tokens = collect(qa.query_stream("Колико трају студије?", []))
+        answer = "".join(tokens).split("\n\n---")[0]
+
+        self.assertEqual(answer, "Studije traju četiri godine.")
+        self.assertNotRegex(answer, r"[\u0400-\u04FF]")
+
+    def test_cyrillic_no_info_answer_gets_no_sources(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat.return_value = "Немам информацију о томе."
+
+        result = qa.query("Колико кошта школарина?")
+
+        self.assertEqual(result["answer"], "Nemam informaciju o tome.")
+        self.assertEqual(result["sources"], [])
+
+    def test_cyrillic_output_can_be_requested(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat.return_value = "Odgovor."
+
+        result = qa.query("Koliko traju studije?", script="cyrillic")
+
+        self.assertEqual(result["answer"], "Одговор.")
+
+    def test_prompt_forbids_context_boilerplate(self):
+        self.assertIn("Ne pominjite kontekst", UniversityQASystem.SYSTEM_PROMPT)
+
+    def test_context_intro_is_stripped_from_answer(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat.return_value = (
+            "Na osnovu priloženog konteksta, studije traju četiri godine "
+            "[Izvor 1]."
+        )
+
+        result = qa.query("Koliko traju studije?")
+
+        self.assertEqual(
+            result["answer"], "Studije traju četiri godine [Izvor 1]."
+        )
+        self.assertNotIn("kontekst", result["answer"].lower())
+
+    def test_context_intro_is_stripped_from_stream(self):
+        qa, llm, _ = self.make_cyrillic_system()
+        llm.chat_stream.side_effect = lambda messages: iter([
+            "Na osnovu ", "priloženog ", "konteksta, ", "studije ", "traju ",
+            "četiri godine [Izvor 1].",
+        ])
+
+        tokens = collect(qa.query_stream("Koliko traju studije?", []))
+        answer = "".join(tokens).split("\n\n---")[0]
+
+        self.assertEqual(answer, "Studije traju četiri godine [Izvor 1].")
+        self.assertNotIn("kontekst", answer.lower())
+
+    def test_source_filenames_follow_the_requested_script(self):
+        qa, _, _ = self.make_cyrillic_system()
+        metas = [dict(CHUNK_META, filename=self.CYRILLIC_FILENAME)]
+
+        self.assertEqual(
+            qa._format_sources(metas),
+            ["[1] Uvod u programiranje.pdf — strana 3"],
+        )
+        self.assertEqual(
+            qa._format_sources(metas, script="cyrillic"),
+            ["[1] Увод у програмирање.pdf — страна 3"],
+        )
 
 
 class NoInfoAnswerTests(unittest.TestCase):
